@@ -1,0 +1,68 @@
+# Dependencies
+node_modules/
+*/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Agent & AI artifacts
+.agents/
+
+# Build & Output
+dist/
+*/dist/
+.cache/
+.fallow/
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+
+# Environment & Secrets
+.env
+.env.*
+*.env
+!.env.example
+!.env.template
+
+# Runtime Data & Proxies
+data/
+*/data/
+**/proxies.json
+
+# Logs
+logs/
+*.log
+
+# Testing & Coverage
+coverage/
+test-results/
+playwright-report/
+blob-report/
+
+# Bundle stats & analysis reports
+build-stats.json
+stats.html
+statoscope-report.html
+
+# IDE & Editors
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.sublime-project
+*.sublime-workspace
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+[Tt]humbs.db
+[Tt]humbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+[Dd]esktop.ini
