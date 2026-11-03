@@ -108,6 +108,10 @@ export function clearMemoryCache() {
   fetchPromises.clear();
   progressCallbacks.clear();
   cancellableCallbacks.clear();
+  progressivePartCache.forEach((entry) => {
+    if (entry.timerId) clearTimeout(entry.timerId);
+  });
+  progressivePartCache.clear();
 }
 
 export function cancelProgress(progressCallback: ApiOnProgress) {
@@ -248,6 +252,93 @@ function prepareMedia(mediaData: Exclude<ApiParsedMedia, ArrayBuffer>): ApiPrepa
   return mediaData;
 }
 
+const PREFETCH_CHUNKS_AHEAD = 2;
+const MAX_PREFETCH_CACHE_ENTRIES = 6;
+const PREFETCH_TTL_MS = 30_000;
+
+type ProgressivePartResult = {
+  arrayBuffer?: ArrayBuffer;
+  mimeType?: string;
+  fullSize?: number;
+};
+
+const progressivePartCache = new Map<string, {
+  promise: Promise<ProgressivePartResult | undefined>;
+  timerId?: ReturnType<typeof setTimeout>;
+}>();
+
+async function downloadPartWithRetry(
+  params: { url: string; start: number; end: number },
+  retryNumber = 0,
+): Promise<ProgressivePartResult | undefined> {
+  const result = await callApi('downloadMedia', { mediaFormat: ApiMediaFormat.Progressive, ...params });
+  if (!result) {
+    if (retryNumber >= MAX_MEDIA_RETRIES) {
+      if (DEBUG) {
+        // eslint-disable-next-line no-console
+        console.warn(`Failed to download media part after ${MAX_MEDIA_RETRIES} retries:`, params.url);
+      }
+      return undefined;
+    }
+    await new Promise((resolve) => {
+      setTimeout(resolve, getRetryTimeout(retryNumber));
+    });
+    if (DEBUG) {
+      // eslint-disable-next-line no-console
+      console.debug(`Retrying to download media part ${params.url}, attempt ${retryNumber + 1}`);
+    }
+    return downloadPartWithRetry(params, retryNumber + 1);
+  }
+  return result;
+}
+
+function getOrFetchProgressivePart(
+  params: { url: string; start: number; end: number },
+  consume: boolean,
+): Promise<ProgressivePartResult | undefined> {
+  const cacheKey = `${params.url}:${params.start}-${params.end}`;
+  const existing = progressivePartCache.get(cacheKey);
+
+  if (existing) {
+    if (consume) {
+      if (existing.timerId) clearTimeout(existing.timerId);
+      progressivePartCache.delete(cacheKey);
+    }
+    return existing.promise;
+  }
+
+  const promise = downloadPartWithRetry(params)
+    .then((res) => {
+      if (!res || !res.arrayBuffer) {
+        progressivePartCache.delete(cacheKey);
+      }
+      return res;
+    })
+    .catch(() => {
+      progressivePartCache.delete(cacheKey);
+      return undefined;
+    });
+
+  if (!consume) {
+    if (progressivePartCache.size >= MAX_PREFETCH_CACHE_ENTRIES) {
+      const oldestKey = progressivePartCache.keys().next().value;
+      if (oldestKey) {
+        const oldest = progressivePartCache.get(oldestKey);
+        if (oldest?.timerId) clearTimeout(oldest.timerId);
+        progressivePartCache.delete(oldestKey);
+      }
+    }
+
+    const timerId = setTimeout(() => {
+      progressivePartCache.delete(cacheKey);
+    }, PREFETCH_TTL_MS);
+
+    progressivePartCache.set(cacheKey, { promise, timerId });
+  }
+
+  return promise;
+}
+
 if (IS_PROGRESSIVE_SUPPORTED) {
   navigator.serviceWorker.addEventListener('message', async (e) => {
     const { type, messageId, params } = e.data as {
@@ -260,30 +351,11 @@ if (IS_PROGRESSIVE_SUPPORTED) {
       return;
     }
 
-    async function downloadWithRetry(retryNumber = 0) {
-      const result = await callApi('downloadMedia', { mediaFormat: ApiMediaFormat.Progressive, ...params });
-      if (!result) {
-        if (retryNumber >= MAX_MEDIA_RETRIES) {
-          if (DEBUG) {
-            // eslint-disable-next-line no-console
-            console.warn(`Failed to download media part after ${MAX_MEDIA_RETRIES} retries:`, params.url);
-          }
-          return undefined;
-        }
-        await new Promise((resolve) => {
-          setTimeout(resolve, getRetryTimeout(retryNumber));
-        });
-        if (DEBUG) {
-          // eslint-disable-next-line no-console
-          console.debug(`Retrying to download media part ${params.url}, attempt ${retryNumber + 1}`);
-        }
-        return downloadWithRetry(retryNumber + 1);
-      }
-      return result;
+    let result = await getOrFetchProgressivePart(params, true);
+    if (result?.arrayBuffer && result.arrayBuffer.byteLength === 0) {
+      result = await downloadPartWithRetry(params);
     }
-
-    const result = await downloadWithRetry();
-    if (!result) {
+    if (!result || !result.arrayBuffer || result.arrayBuffer.byteLength === 0) {
       return;
     }
 
@@ -297,7 +369,22 @@ if (IS_PROGRESSIVE_SUPPORTED) {
         mimeType,
         fullSize,
       },
-    }, [arrayBuffer!]);
+    }, [arrayBuffer]);
+
+    // Prefetch upcoming sequential video chunks in the background so playback doesn't stall
+    const partLength = params.end - params.start + 1;
+    if (fullSize && partLength > 0 && params.end + 1 < fullSize) {
+      for (let step = 1; step <= PREFETCH_CHUNKS_AHEAD; step++) {
+        const nextStart = params.end + 1 + (step - 1) * partLength;
+        if (nextStart >= fullSize) break;
+        const nextEnd = nextStart + partLength - 1;
+        void getOrFetchProgressivePart({
+          url: params.url,
+          start: nextStart,
+          end: nextEnd,
+        }, false);
+      }
+    }
   });
 }
 

@@ -15,6 +15,64 @@ export interface WSRelayOptions {
   pool: ProxyPool;
 }
 
+export interface RelayStatsSnapshot {
+  rxBytes: number;
+  txBytes: number;
+  activeConnections: number;
+  connectionsByDc: Record<string, number>;
+  timestamp: string;
+}
+
+class RelayStatsTracker {
+  public rxBytes = 0;
+  public txBytes = 0;
+  public activeConnections = 0;
+  private dcCounts = new Map<number, number>();
+
+  public recordRx(bytes: number): void {
+    if (bytes > 0) {
+      this.rxBytes += bytes;
+    }
+  }
+
+  public recordTx(bytes: number): void {
+    if (bytes > 0) {
+      this.txBytes += bytes;
+    }
+  }
+
+  public onConnect(dcId: number): void {
+    this.activeConnections += 1;
+    this.dcCounts.set(dcId, (this.dcCounts.get(dcId) || 0) + 1);
+  }
+
+  public onDisconnect(dcId: number): void {
+    this.activeConnections = Math.max(0, this.activeConnections - 1);
+    const current = this.dcCounts.get(dcId) || 0;
+    if (current <= 1) {
+      this.dcCounts.delete(dcId);
+    } else {
+      this.dcCounts.set(dcId, current - 1);
+    }
+  }
+
+  public getSnapshot(): RelayStatsSnapshot {
+    const connectionsByDc: Record<string, number> = {};
+    for (const [dc, count] of this.dcCounts.entries()) {
+      connectionsByDc[`DC${dc}`] = count;
+    }
+    return {
+      rxBytes: this.rxBytes,
+      txBytes: this.txBytes,
+      activeConnections: this.activeConnections,
+      connectionsByDc,
+      timestamp: new Date().toISOString(),
+    };
+  }
+}
+
+export const relayStats = new RelayStatsTracker();
+
 export function createWebSocketRelay(options: { pool: ProxyPool }): {
   wss: WebSocketServer;
   handleUpgrade: (
@@ -86,6 +144,9 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
       }
     }
 
+    let isCleanedUp = false;
+    relayStats.onConnect(dcId);
+
     // Connect to active MTProxy TCP endpoint
     tcpSocket = net.createConnection(
       {
@@ -94,16 +155,20 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
       },
       () => {
         isTcpConnected = true;
+        tcpSocket?.setNoDelay(true);
+        tcpSocket?.setKeepAlive(true, 30000);
 
         if (!isRaw && handshakeHeader) {
           // Transmit 64-byte Obfuscated2 handshake
           tcpSocket?.write(handshakeHeader);
+          relayStats.recordTx(handshakeHeader.length);
         }
 
         // Flush queued messages from WebSocket client
         while (pendingClientMessages.length > 0) {
           const msg = pendingClientMessages.shift();
           if (msg && tcpSocket) {
+            relayStats.recordTx(msg.length);
             if (!isRaw && encryptCipher) {
               const encrypted = encryptCipher.update(msg);
               tcpSocket.write(encrypted);
@@ -115,8 +180,11 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
       }
     );
 
+    tcpSocket.setNoDelay(true);
+
     // Inbound from MTProxy TCP socket -> Client WebSocket
     tcpSocket.on('data', (chunk: Buffer) => {
+      relayStats.recordRx(chunk.length);
       if (ws.readyState === WebSocket.OPEN) {
         if (!isRaw && decryptCipher) {
           try {
@@ -151,6 +219,7 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
       }
 
       try {
+        relayStats.recordTx(buf.length);
         if (!isRaw && encryptCipher) {
           const encrypted = encryptCipher.update(buf);
           tcpSocket.write(encrypted);
@@ -164,6 +233,10 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
     });
 
     const cleanup = () => {
+      if (!isCleanedUp) {
+        isCleanedUp = true;
+        relayStats.onDisconnect(dcId);
+      }
       if (tcpSocket) {
         tcpSocket.removeAllListeners();
         tcpSocket.destroy();
@@ -203,6 +276,9 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
   ) => {
     const urlObj = new URL(req.url || '/', 'http://localhost');
     if (urlObj.pathname === '/mtproxy') {
+      if ('setNoDelay' in socket && typeof (socket as net.Socket).setNoDelay === 'function') {
+        (socket as net.Socket).setNoDelay(true);
+      }
       wss.handleUpgrade(req, socket, head, (ws) => {
         wss.emit('connection', ws, req);
       });

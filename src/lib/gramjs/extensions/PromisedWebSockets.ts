@@ -34,16 +34,22 @@ export default class PromisedWebSockets {
   }
 
   async readExactly(number: number) {
-    let readData = new Uint8Array(0);
-
-    while (true) {
-      const thisTime = await this.read(number);
-      readData = concat(readData, thisTime);
-      number -= thisTime.length;
-      if (!number) {
-        return readData;
-      }
+    const firstChunk = await this.read(number);
+    if (firstChunk.length === number) {
+      return firstChunk;
     }
+
+    const readData = new Uint8Array(number);
+    readData.set(firstChunk, 0);
+    let offset = firstChunk.length;
+
+    while (offset < number) {
+      const thisTime = await this.read(number - offset);
+      readData.set(thisTime, offset);
+      offset += thisTime.length;
+    }
+
+    return readData;
   }
 
   async read(number: number) {
@@ -81,7 +87,9 @@ export default class PromisedWebSockets {
   getWebSocketLink(ip: string, port: number, isTestServer?: boolean, isPremium?: boolean, dcId = 2) {
     const isMedia = ip.includes('-1') || dcId < 0;
     const signedDcId = isMedia ? -Math.abs(dcId) : Math.abs(dcId);
-    const globalScope = typeof window !== 'undefined' ? (window as any) : (typeof self !== 'undefined' ? (self as any) : undefined);
+    const globalScope = typeof window !== 'undefined'
+      ? (window as any)
+      : (typeof self !== 'undefined' ? (self as any) : undefined);
     const bridgeUrl = (globalScope && globalScope.LIZARDTALK_BRIDGE_WS)
       || import.meta.env?.VITE_MTPROXY_BRIDGE_URL
       || 'ws://localhost:8081/mtproxy';
@@ -175,11 +183,15 @@ export default class PromisedWebSockets {
   receive() {
     if (!this.client) return;
     this.client.onmessage = async (message) => {
+      if (message.data instanceof ArrayBuffer) {
+        const data = new Uint8Array(message.data);
+        this.stream = this.stream.length === 0 ? data : concat(this.stream, data);
+        this.resolveRead?.(true);
+        return;
+      }
       await this.mutex.runExclusive(async () => {
-        const data = message.data instanceof ArrayBuffer
-          ? new Uint8Array(message.data)
-          : new Uint8Array(await new Response(message.data).arrayBuffer());
-        this.stream = concat(this.stream, data);
+        const data = new Uint8Array(await new Response(message.data).arrayBuffer());
+        this.stream = this.stream.length === 0 ? data : concat(this.stream, data);
         this.resolveRead?.(true);
       });
     };

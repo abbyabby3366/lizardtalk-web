@@ -1,0 +1,565 @@
+/* LizardTalk Draggable Speed Test Floater & Inspector Modal (TalkPro-iOS Parity) */
+
+.floaterBadge {
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+
+  position: fixed;
+  z-index: 1050;
+
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+  justify-content: center;
+
+  width: 70px;
+  height: 70px;
+  padding: 6px 4px;
+  border: 2px solid #38bdf8;
+  border-radius: 35px;
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+
+  background: rgba(15, 23, 42, 0.84);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.12s ease;
+
+  &:hover {
+    box-shadow: 0 6px 18px rgba(56, 189, 248, 0.32);
+  }
+
+  &:active {
+    cursor: grabbing;
+    transform: scale(0.97);
+  }
+}
+
+.floaterDragging {
+  cursor: grabbing;
+  box-shadow: 0 8px 24px rgba(56, 189, 248, 0.45);
+  transition: none;
+}
+
+.floaterRx {
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: #ffffff;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+}
+
+.floaterTx {
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.15;
+  color: #cbd5e1;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+}
+
+.floaterPing {
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+}
+
+.colorGreen {
+  color: #4ade80;
+}
+
+.colorYellow {
+  color: #facc15;
+}
+
+.colorRed {
+  color: #f87171;
+}
+
+.colorCyan {
+  color: #38bdf8;
+}
+
+.colorMuted {
+  color: #94a3b8;
+}
+
+/* Inspector Modal Backdrop & Container */
+.inspectorBackdrop {
+  position: fixed;
+  z-index: 10050;
+  inset: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  padding: 16px;
+
+  background: rgba(0, 0, 0, 0.62);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+
+  animation: inspectorFadeIn 0.18s ease-out;
+}
+
+@keyframes inspectorFadeIn {
+  from {
+    transform: scale(0.96);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.inspectorContainer {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+
+  width: 100%;
+  max-width: 440px;
+  max-height: 85vh;
+  border: 1px solid #334155;
+  border-radius: 20px;
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #f8fafc;
+
+  background: #0f172a;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65);
+}
+
+.inspectorHeader {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.6);
+}
+
+.inspectorTitle {
+  margin: 0;
+
+  font-size: 17px;
+  font-weight: 700;
+  color: #f8fafc;
+  letter-spacing: -0.2px;
+}
+
+.headerControls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.langButton {
+  cursor: pointer;
+
+  height: 26px;
+  padding: 4px 10px;
+  border: 1px solid #334155;
+  border-radius: 13px;
+
+  font-size: 11px;
+  font-weight: 700;
+  color: #38bdf8;
+
+  background: #1e293b;
+
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: #334155;
+  }
+}
+
+.closeCircleButton {
+  cursor: pointer;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 14px;
+
+  font-size: 14px;
+  font-weight: 700;
+  color: #cbd5e1;
+
+  background: #334155;
+
+  transition: background 0.15s ease, color 0.15s ease;
+
+  &:hover {
+    color: #ffffff;
+    background: #475569;
+  }
+}
+
+.inspectorScroll {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+
+  padding: 14px 16px 18px;
+}
+
+/* Section Card */
+.sectionCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 14px;
+
+  background: #1e293b;
+}
+
+.cardHeader,
+.dcPingHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.cardTitle {
+  font-size: 12px;
+  font-weight: 700;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.infoButton {
+  cursor: pointer;
+
+  padding: 2px 4px;
+  border: none;
+  border-radius: 6px;
+
+  font-size: 14px;
+  line-height: 1;
+  color: #64748b;
+
+  background: none;
+
+  transition: color 0.15s ease, background 0.15s ease;
+
+  &:hover {
+    color: #38bdf8;
+    background: rgba(56, 189, 248, 0.1);
+  }
+}
+
+/* Section A: Throughput */
+.throughputGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.throughputItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.throughputSub,
+.pingMetricSub {
+  font-size: 11px;
+  font-weight: 500;
+  color: #64748b;
+}
+
+.throughputValRx {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #4ade80;
+}
+
+.throughputValTx {
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #38bdf8;
+}
+
+/* Action Buttons & Progress Bars */
+.actionButton {
+  cursor: pointer;
+
+  width: 100%;
+  height: 42px;
+  border: none;
+  border-radius: 10px;
+
+  font-size: 14px;
+  font-weight: 600;
+  color: #ffffff;
+
+  transition: opacity 0.15s ease, filter 0.15s ease;
+
+  &:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+}
+
+.btnSpeedTest {
+  background: #0284c7;
+}
+
+.btnPingTest {
+  background: #4f46e5;
+}
+
+.btnDcPing {
+  height: 36px;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #0d9488;
+}
+
+.progressTrack {
+  overflow: hidden;
+
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+
+  background: #334155;
+}
+
+.progressFillSpeed {
+  transform-origin: left center;
+
+  width: 100%;
+  height: 100%;
+  border-radius: 3px;
+
+  background: #38bdf8;
+
+  transition: transform 0.15s ease-out;
+}
+
+.progressFillPing {
+  transform-origin: left center;
+
+  width: 100%;
+  height: 100%;
+  border-radius: 3px;
+
+  background: #818cf8;
+
+  transition: transform 0.2s ease-out;
+}
+
+.speedStatusText {
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: #cbd5e1;
+  text-align: center;
+}
+
+/* Section C: Ping 3-column metrics */
+.pingMetricsGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  text-align: center;
+}
+
+.pingMetricCol {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+}
+
+.pingMetricVal {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #f8fafc;
+}
+
+.cardDivider {
+  height: 1px;
+  margin: 2px 0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.dcPingTitleGroup {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.dcPingTitle {
+  font-size: 12px;
+  font-weight: 600;
+  color: #94a3b8;
+}
+
+.dcPingValue {
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Section D: Diagnostics */
+.diagBox {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: #cbd5e1;
+
+  background: rgba(15, 23, 42, 0.55);
+}
+
+.diagRow {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.diagLabel {
+  flex-shrink: 0;
+  color: #94a3b8;
+}
+
+.diagValue {
+  color: #f8fafc;
+  text-align: right;
+  word-break: break-all;
+}
+
+.diagTimeStack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.25;
+}
+
+.diagTimePrimary {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f8fafc;
+}
+
+.diagDateSecondary {
+  font-size: 11px;
+  color: #64748b;
+}
+
+.errorBanner {
+  padding: 8px 10px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 8px;
+
+  font-size: 12px;
+  line-height: 1.4;
+  color: #fca5a5;
+
+  background: rgba(239, 68, 68, 0.14);
+}
+
+/* Info Tooltip Modal */
+.tooltipBackdrop {
+  position: fixed;
+  z-index: 10060;
+  inset: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  padding: 20px;
+
+  background: rgba(0, 0, 0, 0.65);
+
+  animation: inspectorFadeIn 0.15s ease-out;
+}
+
+.tooltipCard {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  width: 100%;
+  max-width: 340px;
+  padding: 18px;
+  border: 1px solid #475569;
+  border-radius: 16px;
+
+  background: #1e293b;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+}
+
+.tooltipTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #38bdf8;
+}
+
+.tooltipBody {
+  margin: 0;
+
+  font-size: 13px;
+  line-height: 1.55;
+  color: #e2e8f0;
+  white-space: pre-line;
+}
+
+.tooltipOkBtn {
+  cursor: pointer;
+
+  align-self: flex-end;
+
+  padding: 6px 16px;
+  border: none;
+  border-radius: 8px;
+
+  font-size: 13px;
+  font-weight: 600;
+  color: #ffffff;
+
+  background: #0284c7;
+
+  &:hover {
+    background: #0369a1;
+  }
+}

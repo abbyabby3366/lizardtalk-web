@@ -20,6 +20,7 @@ import { getServerTimeOffset } from '../../../util/serverTime';
 import {
   FloodTestPhoneWaitError,
   FloodWaitError,
+  InvalidBufferError,
   MsgWaitError,
   NetworkMigrateError,
   PhoneMigrateError,
@@ -587,7 +588,10 @@ class TelegramClient {
     }
 
     while (true) {
-      const dc = getDC(dcId, hasAuthKey);
+      // Over MTProxy Obfuscated2, zwsX-1 (-dcId) routes to a separate Media DC server IP
+      // that does not share the AuthKey negotiated on Production DC (+dcId).
+      // Always connect exported senders to Production DC (+dcId) matching the session AuthKey.
+      const dc = getDC(dcId, false);
       try {
         await sender.connect(new this._connection({
           ip: dc.ipAddress,
@@ -639,7 +643,9 @@ class TelegramClient {
 
         return sender;
       } catch (err: any) {
-        if (err instanceof HttpStreamError && err.status === 404 && this.session.dcId !== dcId) {
+        const isBadAuthKeyError = (err instanceof InvalidBufferError && err.code === 404)
+          || (err instanceof HttpStreamError && err.status === 404);
+        if (isBadAuthKeyError && this.session.dcId !== dcId) {
           const pendingAuthKey = this._waitingForAuthKey[dcId];
           if (pendingAuthKey && !firstConnectResolver) {
             await pendingAuthKey;
@@ -1073,6 +1079,8 @@ class TelegramClient {
         end: args.end,
         dcId: doc.dcId,
         workers: args.workers,
+        partSizeKb: args.partSizeKb,
+        isPriority: args.isPriority ?? (args.start !== undefined),
       },
     );
   }

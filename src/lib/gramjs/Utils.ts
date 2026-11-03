@@ -111,10 +111,10 @@ export function getDownloadPartSize(fileSize: number) {
   if (fileSize <= 65536) { // 64KB
     return 64;
   }
-  if (fileSize <= 104857600) { // 100MB
+  if (fileSize <= 262144) { // 256KB
     return 128;
   }
-  if (fileSize <= 786432000) { // 750MB
+  if (fileSize <= 1048576) { // 1MB (e.g. 512KB progressive range -> 2x 256KB parallel chunks)
     return 256;
   }
   if (fileSize <= 2097152000) { // 2000MB

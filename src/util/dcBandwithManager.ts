@@ -2,7 +2,7 @@ import { DEBUG } from '../config';
 
 import Deferred from './Deferred';
 
-const MAX_CONCURRENT_CONNECTIONS = 3;
+const MAX_CONCURRENT_CONNECTIONS = 4;
 const MAX_CONCURRENT_CONNECTIONS_PREMIUM = 6;
 
 const MAX_ACTIVE_REQUEST_SIZE = 9 * 1024 * 1024;
@@ -166,18 +166,18 @@ class DcBandwidthManager {
 
     for (let i = 0; i < this.maxConnections; i++) {
       const foreman = this.foremans[i];
-      if (foreman.canAccept(requestSize)) {
-        return i; // Prefer filling up free foremans to avoid unnecessary connections
+      const totalHeapSize = foreman.activeRequestHeapSize + foreman.queuedRequestHeapSize;
+      if (totalHeapSize === 0 && foreman.canAccept(requestSize)) {
+        return i; // Immediately pick an idle connection; concurrent requests stripe across 0..maxConnections-1
       }
 
-      const totalHeapSize = foreman.activeRequestHeapSize + foreman.queuedRequestHeapSize;
       if (totalHeapSize < minTotalHeapSize) {
         minTotalHeapSize = totalHeapSize;
         minHeapForemanIndex = i;
       }
     }
 
-    // If every foreman is busy, use the one with the smallest total heap size
+    // If every foreman has in-flight work, use the one with the smallest total heap size
     return minHeapForemanIndex;
   }
 

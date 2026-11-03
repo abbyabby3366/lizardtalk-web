@@ -40,10 +40,11 @@ import UiLoader from './common/UiLoader';
 import AppInactive from './main/AppInactive';
 import LockScreen from './main/LockScreen.async';
 import Main from './main/Main.async';
+import MtProxyManagerModal from './proxy/MtProxyManagerModal';
+import MtProxyStatusBadge from './proxy/MtProxyStatusBadge';
+import ProxySpeedTestFloater from './proxy/ProxySpeedTestFloater';
 // import Test from './test/demo/MessageTextStreamingTest';
 import Transition from './ui/Transition';
-import MtProxyStatusBadge from './proxy/MtProxyStatusBadge';
-import MtProxyManagerModal from './proxy/MtProxyManagerModal';
 
 import styles from './App.module.scss';
 
@@ -282,6 +283,7 @@ const App = ({
         isOpen={isProxyModalOpen}
         onClose={() => setIsProxyModalOpen(false)}
       />
+      <ProxySpeedTestFloater />
 
       <Notifications />
     </UiLoader>

@@ -15,7 +15,8 @@ export interface HealthCheckResult {
  */
 export async function checkProxyHealth(
   proxy: ProxyRecord,
-  timeoutMs: number = 4000
+  timeoutMs: number = 4000,
+  dcId: number = 2
 ): Promise<HealthCheckResult> {
   const startTime = Date.now();
   const timestamp = new Date().toISOString();
@@ -54,8 +55,8 @@ export async function checkProxyHealth(
     }, timeoutMs);
 
     try {
-      // 1. Generate authentic Obfuscated2 handshake header (targeting DC 2 or DC 5)
-      const handshake = createHandshake(proxy.secret, 2, PROTOCOL_INTERMEDIATE);
+      // 1. Generate authentic Obfuscated2 handshake header
+      const handshake = createHandshake(proxy.secret, dcId, PROTOCOL_INTERMEDIATE);
       const { initialPacket, encryptCipher, decryptCipher } = handshake;
 
       socket = net.createConnection(
@@ -157,10 +158,16 @@ export class HealthCheckManager {
 
     try {
       const proxies = this.pool.getAllProxies();
-      for (const proxy of proxies) {
-        const result = await checkProxyHealth(proxy);
+      const results = await Promise.all(
+        proxies.map(async (proxy) => ({
+          id: proxy.id,
+          result: await checkProxyHealth(proxy),
+        }))
+      );
+
+      for (const { id, result } of results) {
         this.pool.updateProxyHealth(
-          proxy.id,
+          id,
           result.isOnline,
           result.latencyMs,
           result.error
