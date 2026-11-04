@@ -28,16 +28,21 @@ const MP4_SIZES_TYPES = new Set(['u', 'v']);
 
 export default async function downloadMedia(
   {
-    url, mediaFormat, start, end, isHtmlAllowed,
+    url, mediaFormat, start, end, isHtmlAllowed, isPriority,
   }: {
-    url: string; mediaFormat: ApiMediaFormat; start?: number; end?: number; isHtmlAllowed?: boolean;
+    url: string;
+    mediaFormat: ApiMediaFormat;
+    start?: number;
+    end?: number;
+    isHtmlAllowed?: boolean;
+    isPriority?: boolean;
   },
   client: TelegramClient,
   onProgress?: ApiOnProgress,
 ) {
   const {
     data, mimeType, fullSize,
-  } = await download(url, client, onProgress, start, end, isHtmlAllowed) || {};
+  } = await download(url, client, onProgress, start, end, isHtmlAllowed, isPriority) || {};
 
   if (!data) {
     return undefined;
@@ -80,6 +85,7 @@ async function download(
   start?: number,
   end?: number,
   isHtmlAllowed?: boolean,
+  isPriority?: boolean,
 ) {
   const parsed = parseMediaUrl(url);
 
@@ -147,7 +153,7 @@ async function download(
       GramJs.Photo | GramJs.Document | GramJs.WebDocument
     );
     const data = await client.downloadMedia(entityWithType, {
-      sizeType, start, end, progressCallback: onProgress, workers: DOWNLOAD_WORKERS,
+      sizeType, start, end, progressCallback: onProgress, workers: DOWNLOAD_WORKERS, isPriority,
     });
     let mimeType;
     let fullSize;

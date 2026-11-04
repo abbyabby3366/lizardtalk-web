@@ -343,6 +343,28 @@
   background: #0d9488;
 }
 
+.btnProxyToggleOff {
+  height: 36px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  border-radius: 8px;
+
+  font-size: 13px;
+  color: #fde68a;
+
+  background: rgba(245, 158, 11, 0.18);
+}
+
+.btnProxyToggleOn {
+  height: 36px;
+  border: 1px solid rgba(16, 185, 129, 0.5);
+  border-radius: 8px;
+
+  font-size: 13px;
+  color: #6ee7b7;
+
+  background: rgba(16, 185, 129, 0.22);
+}
+
 .progressTrack {
   overflow: hidden;
 

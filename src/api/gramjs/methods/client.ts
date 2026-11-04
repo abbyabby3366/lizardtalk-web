@@ -361,7 +361,12 @@ export function invokeRequestBeacon<T extends GramJs.AnyRequest>(
 
 export async function downloadMedia(
   args: {
-    url: string; mediaFormat: ApiMediaFormat; start?: number; end?: number; isHtmlAllowed?: boolean;
+    url: string;
+    mediaFormat: ApiMediaFormat;
+    start?: number;
+    end?: number;
+    isHtmlAllowed?: boolean;
+    isPriority?: boolean;
   },
   onProgress?: ApiOnProgress,
 ) {

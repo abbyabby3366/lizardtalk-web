@@ -1,3 +1,8 @@
+import {
+  isMtProxyDisabled,
+  NET_STATS_CHANNEL_NAME,
+  notifyProxyConfigChanged,
+} from '../../lib/gramjs/extensions/PromisedWebSockets';
 import type { FC } from '../../lib/teact/teact';
 import React, { useCallback, useEffect, useState } from '../../lib/teact/teact';
 
@@ -13,6 +18,7 @@ export interface MtProxyStatusBadgeProps {
 
 const MtProxyStatusBadge: FC<MtProxyStatusBadgeProps> = ({ onOpenManager }) => {
   const [activeProxy, setActiveProxy] = useState<ProxyRecord | undefined>(undefined);
+  const [isProxyEnabled, setIsProxyEnabled] = useState<boolean>(() => !isMtProxyDisabled());
   const [hasError, setHasError] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
 
@@ -29,6 +35,14 @@ const MtProxyStatusBadge: FC<MtProxyStatusBadgeProps> = ({ onOpenManager }) => {
       const data = (await response.json()) as ProxyListResponse;
       if (!data || !Array.isArray(data.proxies)) {
         throw new Error('Invalid response structure received from proxy service');
+      }
+
+      if (typeof data.proxyEnabled === 'boolean') {
+        const nextDisabled = !data.proxyEnabled;
+        setIsProxyEnabled(data.proxyEnabled);
+        if (isMtProxyDisabled() !== nextDisabled) {
+          notifyProxyConfigChanged(nextDisabled, true);
+        }
       }
 
       const current = data.proxies.find((p) => p.id === data.activeId);
@@ -49,14 +63,30 @@ const MtProxyStatusBadge: FC<MtProxyStatusBadgeProps> = ({ onOpenManager }) => {
     }
   }, []);
 
-  // Initial fetch on mount and automatic polling every 5 seconds
+  // Initial fetch on mount, BroadcastChannel listener, and automatic polling every 5 seconds
   useEffect(() => {
     syncActiveProxy();
     const intervalId = setInterval(syncActiveProxy, 5000);
-    return () => clearInterval(intervalId);
+    const channel = typeof BroadcastChannel !== 'undefined'
+      ? new BroadcastChannel(NET_STATS_CHANNEL_NAME)
+      : undefined;
+    if (channel) {
+      channel.onmessage = (event) => {
+        if (event.data?.type === 'proxyModeChanged' && typeof event.data.proxyDisabled === 'boolean') {
+          setIsProxyEnabled(!event.data.proxyDisabled);
+        }
+      };
+    }
+    return () => {
+      clearInterval(intervalId);
+      channel?.close();
+    };
   }, [syncActiveProxy]);
 
   const getStatusColorDot = () => {
+    if (!isProxyEnabled) {
+      return `${styles.statusDot} ${styles.dotBlue}`;
+    }
     if (hasError || !activeProxy || !activeProxy.isOnline) {
       return `${styles.statusDot} ${styles.dotRed}`;
     }
@@ -71,6 +101,15 @@ const MtProxyStatusBadge: FC<MtProxyStatusBadgeProps> = ({ onOpenManager }) => {
   };
 
   const renderBadgeContent = () => {
+    if (!isProxyEnabled) {
+      return (
+        <>
+          <span className={getStatusColorDot()} />
+          <span className={styles.badgeLatency}>MTProxy: Off (Direct / VPN)</span>
+        </>
+      );
+    }
+
     if (hasError) {
       return (
         <>

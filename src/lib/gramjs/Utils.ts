@@ -111,17 +111,14 @@ export function getDownloadPartSize(fileSize: number) {
   if (fileSize <= 65536) { // 64KB
     return 64;
   }
-  if (fileSize <= 262144) { // 256KB
+  if (fileSize <= 1048576) { // Up to 1MB (e.g. 512KB progressive range -> 4x 128KB parallel chunks across all 4 DC connections)
     return 128;
   }
-  if (fileSize <= 1048576) { // 1MB (e.g. 512KB progressive range -> 2x 256KB parallel chunks)
+  if (fileSize <= 2097152000) { // Up to 2000MB -> 256KB chunks prevent head-of-line blocking on high-RTT proxy links
     return 256;
   }
-  if (fileSize <= 2097152000) { // 2000MB
-    return 512;
-  }
   if (fileSize <= 4194304000) { // 4000MB
-    return 1024;
+    return 512;
   }
 
   throw new Error('File size too large');

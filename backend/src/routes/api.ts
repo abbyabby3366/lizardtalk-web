@@ -20,6 +20,7 @@ export function createApiRouter(pool: ProxyPool): Router {
       const proxies = pool.getAllProxies();
       res.json({
         activeId: activeProxy.id,
+        proxyEnabled: pool.isProxyEnabled(),
         proxies,
       });
     } catch (err: any) {
@@ -87,13 +88,42 @@ export function createApiRouter(pool: ProxyPool): Router {
 
     try {
       const activeProxy = pool.setActiveProxy(id);
+      pool.setProxyEnabled(true);
+      relayStats.closeAllConnections('Switched active MTProxy');
       res.json({
         success: true,
         activeId: activeProxy.id,
+        proxyEnabled: pool.isProxyEnabled(),
         activeProxy,
       });
     } catch (err: any) {
       res.status(404).json({ error: err.message });
+    }
+  });
+
+  /**
+   * POST /api/proxies/mode
+   * Manually turns the MTProto proxy ON (true) or OFF (false — Direct / VPN mode).
+   */
+  router.post('/proxies/mode', (req: Request, res: Response) => {
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+      res.status(400).json({ error: 'Field "enabled" (boolean) is required.' });
+      return;
+    }
+
+    try {
+      const proxyEnabled = pool.setProxyEnabled(enabled);
+      relayStats.closeAllConnections(enabled ? 'MTProxy mode enabled' : 'MTProxy mode disabled');
+      const activeProxy = pool.getActiveProxy();
+      res.json({
+        success: true,
+        proxyEnabled,
+        activeId: activeProxy.id,
+        activeProxy,
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
     }
   });
 
@@ -154,6 +184,7 @@ export function createApiRouter(pool: ProxyPool): Router {
       const mem = process.memoryUsage();
       res.json({
         ...snapshot,
+        proxyEnabled: pool.isProxyEnabled(),
         activeProxy,
         serverMemoryMb: Number((mem.rss / (1024 * 1024)).toFixed(1)),
         uptimeSeconds: Math.floor(process.uptime()),

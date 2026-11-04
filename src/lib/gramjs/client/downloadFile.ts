@@ -43,8 +43,9 @@ const DEFAULT_CHUNK_SIZE = 64; // kb
 const ONE_MB = 1024 * 1024;
 const DISCONNECT_SLEEP = 1000;
 
-// Reconnect stalled download requests after one minute
-const SENDER_TIMEOUT = 60 * 1000;
+// Reconnect stalled download requests after 30 seconds: long enough for a 256KB chunk on a slow link,
+// short enough that one retry still fits inside the Service Worker's 60s `PART_TIMEOUT`
+const SENDER_TIMEOUT = 30 * 1000;
 const DOWNLOAD_TIMEOUT_ERROR = 'DOWNLOAD_TIMEOUT';
 // Telegram may have server issues so we try several times
 const SENDER_RETRIES = 5;
@@ -138,14 +139,16 @@ export async function downloadFile(
     end = end && end < fileSize ? end : fileSize - 1;
   }
 
+  const alignedStart = start - (start % MIN_CHUNK_SIZE);
   const rangeSize = end ? end - start + 1 : undefined;
+  const alignedRangeSize = end ? end - alignedStart + 1 : undefined;
 
   if (!partSizeKb) {
     partSizeKb = fileSize ? getDownloadPartSize(rangeSize || fileSize) : DEFAULT_CHUNK_SIZE;
   }
 
   const partSize = partSizeKb * 1024;
-  const partsCount = rangeSize ? Math.ceil(rangeSize / partSize) : 1;
+  const partsCount = alignedRangeSize ? Math.ceil(alignedRangeSize / partSize) : 1;
   const noParallel = !end;
   let deferred: Deferred | undefined;
 
@@ -161,7 +164,7 @@ export async function downloadFile(
   const { signal } = abortController;
   const canceled = new Deferred<never>();
   void canceled.promise.catch(() => undefined);
-  let offset = start;
+  let offset = alignedStart;
   // Used for files with unknown size and for manual cancellations
   let hasEnded = false;
 
@@ -180,12 +183,29 @@ export async function downloadFile(
     let limit = partSize;
     let isPrecise = false;
 
+    if (end) {
+      const remainingBytes = end - offset + 1;
+      const alignedRemaining = Math.max(
+        MIN_CHUNK_SIZE,
+        Math.ceil(remainingBytes / MIN_CHUNK_SIZE) * MIN_CHUNK_SIZE,
+      );
+      if (alignedRemaining < limit) {
+        limit = alignedRemaining;
+        isPrecise = true;
+      }
+    }
+
     if (Math.floor(offset / ONE_MB) !== Math.floor((offset + limit - 1) / ONE_MB)) {
       limit = ONE_MB - (offset % ONE_MB);
       isPrecise = true;
     }
 
-    if (offset % MIN_CHUNK_SIZE !== 0 || limit % MIN_CHUNK_SIZE !== 0) {
+    if (
+      offset % limit !== 0
+      || ONE_MB % limit !== 0
+      || offset % MIN_CHUNK_SIZE !== 0
+      || limit % MIN_CHUNK_SIZE !== 0
+    ) {
       isPrecise = true;
     }
 
@@ -255,8 +275,7 @@ export async function downloadFile(
               new Promise<never>((resolve, reject) => {
                 timeoutId = setTimeout(() => {
                   logWithSenderIndex(`Download timed out ${offsetMemo}`);
-                  // Main-DC timeouts cancel the download so the user can retry later
-                  reject(new Error(dcId === client.session.dcId ? 'USER_CANCELED' : DOWNLOAD_TIMEOUT_ERROR));
+                  reject(new Error(DOWNLOAD_TIMEOUT_ERROR));
                 }, SENDER_TIMEOUT);
               }),
             ]))!;
@@ -281,7 +300,14 @@ export async function downloadFile(
               hasEnded = true;
             }
 
-            fileView.write(result.bytes, offsetMemo - start);
+            const writeStart = Math.max(offsetMemo, start);
+            const byteOffsetInChunk = writeStart - offsetMemo;
+            if (byteOffsetInChunk < result.bytes.length) {
+              fileView.write(
+                byteOffsetInChunk > 0 ? result.bytes.subarray(byteOffsetInChunk) : result.bytes,
+                writeStart - start,
+              );
+            }
 
             return;
           } catch (err) {
@@ -296,11 +322,22 @@ export async function downloadFile(
             }
 
             const isDownloadTimeout = err instanceof Error && err.message === DOWNLOAD_TIMEOUT_ERROR;
+            const isConnectionClosed = err instanceof Error && (
+              err.message === 'Not connected'
+              || err.message === 'WebSocket was closed'
+              || err.message === 'Sender was disconnected'
+              || err.message === 'WebSocket connection timeout'
+            );
             const isRetryableRpcError = err instanceof RPCError && (
               err.errorMessage.startsWith('SESSION_REVOKED')
               || err.errorMessage.startsWith('CONNECTION_NOT_INITED')
             );
-            if (isDownloadTimeout || isRetryableRpcError || (sender && !sender.isConnected())) {
+            if (
+              isDownloadTimeout
+              || isConnectionClosed
+              || isRetryableRpcError
+              || (sender && (!sender.isConnected() || sender.isReconnecting))
+            ) {
               if (isDownloadTimeout) {
                 requestAbortController.abort();
                 sender!.reconnect();

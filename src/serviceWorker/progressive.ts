@@ -163,7 +163,8 @@ export async function requestPart(
   params: { url: string; start: number; end: number },
 ): Promise<PartInfo | undefined> {
   const isDownload = params.url.includes('/download/');
-  const client = await (isDownload ? getClientForRequest(params.url) : self.clients.get(e.clientId));
+  const client = (e.clientId && !isDownload ? await self.clients.get(e.clientId) : undefined)
+    || await getClientForRequest(params.url);
   if (!client) {
     return undefined;
   }

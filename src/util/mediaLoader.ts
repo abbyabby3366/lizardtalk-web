@@ -253,8 +253,9 @@ function prepareMedia(mediaData: Exclude<ApiParsedMedia, ArrayBuffer>): ApiPrepa
 }
 
 const PREFETCH_CHUNKS_AHEAD = 2;
-const MAX_PREFETCH_CACHE_ENTRIES = 6;
+const MAX_PREFETCH_CACHE_ENTRIES = 8;
 const PREFETCH_TTL_MS = 30_000;
+const PREFETCH_DELAY_MS = 60;
 
 type ProgressivePartResult = {
   arrayBuffer?: ArrayBuffer;
@@ -267,11 +268,18 @@ const progressivePartCache = new Map<string, {
   timerId?: ReturnType<typeof setTimeout>;
 }>();
 
+const lastRequestedStartByUrl = new Map<string, number>();
+
 async function downloadPartWithRetry(
   params: { url: string; start: number; end: number },
+  isPriority = true,
   retryNumber = 0,
 ): Promise<ProgressivePartResult | undefined> {
-  const result = await callApi('downloadMedia', { mediaFormat: ApiMediaFormat.Progressive, ...params });
+  const result = await callApi('downloadMedia', {
+    mediaFormat: ApiMediaFormat.Progressive,
+    isPriority,
+    ...params,
+  });
   if (!result) {
     if (retryNumber >= MAX_MEDIA_RETRIES) {
       if (DEBUG) {
@@ -287,7 +295,7 @@ async function downloadPartWithRetry(
       // eslint-disable-next-line no-console
       console.debug(`Retrying to download media part ${params.url}, attempt ${retryNumber + 1}`);
     }
-    return downloadPartWithRetry(params, retryNumber + 1);
+    return downloadPartWithRetry(params, isPriority, retryNumber + 1);
   }
   return result;
 }
@@ -307,9 +315,9 @@ function getOrFetchProgressivePart(
     return existing.promise;
   }
 
-  const promise = downloadPartWithRetry(params)
+  const promise = downloadPartWithRetry(params, consume)
     .then((res) => {
-      if (!res || !res.arrayBuffer) {
+      if (consume || !res || !res.arrayBuffer) {
         progressivePartCache.delete(cacheKey);
       }
       return res;
@@ -319,22 +327,20 @@ function getOrFetchProgressivePart(
       return undefined;
     });
 
-  if (!consume) {
-    if (progressivePartCache.size >= MAX_PREFETCH_CACHE_ENTRIES) {
-      const oldestKey = progressivePartCache.keys().next().value;
-      if (oldestKey) {
-        const oldest = progressivePartCache.get(oldestKey);
-        if (oldest?.timerId) clearTimeout(oldest.timerId);
-        progressivePartCache.delete(oldestKey);
-      }
+  if (progressivePartCache.size >= MAX_PREFETCH_CACHE_ENTRIES) {
+    const oldestKey = progressivePartCache.keys().next().value;
+    if (oldestKey) {
+      const oldest = progressivePartCache.get(oldestKey);
+      if (oldest?.timerId) clearTimeout(oldest.timerId);
+      progressivePartCache.delete(oldestKey);
     }
-
-    const timerId = setTimeout(() => {
-      progressivePartCache.delete(cacheKey);
-    }, PREFETCH_TTL_MS);
-
-    progressivePartCache.set(cacheKey, { promise, timerId });
   }
+
+  const timerId = setTimeout(() => {
+    progressivePartCache.delete(cacheKey);
+  }, PREFETCH_TTL_MS);
+
+  progressivePartCache.set(cacheKey, { promise, timerId });
 
   return promise;
 }
@@ -351,39 +357,56 @@ if (IS_PROGRESSIVE_SUPPORTED) {
       return;
     }
 
+    lastRequestedStartByUrl.set(params.url, params.start);
+
     let result = await getOrFetchProgressivePart(params, true);
     if (result?.arrayBuffer && result.arrayBuffer.byteLength === 0) {
-      result = await downloadPartWithRetry(params);
+      result = await downloadPartWithRetry(params, true);
     }
     if (!result || !result.arrayBuffer || result.arrayBuffer.byteLength === 0) {
+      navigator.serviceWorker.controller?.postMessage({
+        type: 'partResponse',
+        messageId,
+        result: undefined,
+      });
       return;
     }
 
     const { arrayBuffer, mimeType, fullSize } = result;
+    const transferBuffer = arrayBuffer.slice(0);
 
-    navigator.serviceWorker.controller!.postMessage({
+    navigator.serviceWorker.controller?.postMessage({
       type: 'partResponse',
       messageId,
       result: {
-        arrayBuffer,
+        arrayBuffer: transferBuffer,
         mimeType,
         fullSize,
       },
-    }, [arrayBuffer]);
+    }, [transferBuffer]);
 
-    // Prefetch upcoming sequential video chunks in the background so playback doesn't stall
+    // Prefetch upcoming sequential video chunks in the background (with low priority)
+    // after a brief window so immediate `<video>` moov-atom seeks are never queued behind prefetches.
     const partLength = params.end - params.start + 1;
     if (fullSize && partLength > 0 && params.end + 1 < fullSize) {
-      for (let step = 1; step <= PREFETCH_CHUNKS_AHEAD; step++) {
-        const nextStart = params.end + 1 + (step - 1) * partLength;
-        if (nextStart >= fullSize) break;
-        const nextEnd = nextStart + partLength - 1;
-        void getOrFetchProgressivePart({
-          url: params.url,
-          start: nextStart,
-          end: nextEnd,
-        }, false);
-      }
+      const requestedStartSnapshot = params.start;
+      setTimeout(() => {
+        const latestStart = lastRequestedStartByUrl.get(params.url);
+        if (latestStart !== undefined && latestStart !== requestedStartSnapshot && latestStart !== params.end + 1) {
+          // The video element sought to another offset (e.g. moov atom at end of file); skip stale prefetch
+          return;
+        }
+        for (let step = 1; step <= PREFETCH_CHUNKS_AHEAD; step++) {
+          const nextStart = params.end + 1 + (step - 1) * partLength;
+          if (nextStart >= fullSize) break;
+          const nextEnd = Math.min(nextStart + partLength - 1, fullSize - 1);
+          void getOrFetchProgressivePart({
+            url: params.url,
+            start: nextStart,
+            end: nextEnd,
+          }, false);
+        }
+      }, PREFETCH_DELAY_MS);
     }
   });
 }

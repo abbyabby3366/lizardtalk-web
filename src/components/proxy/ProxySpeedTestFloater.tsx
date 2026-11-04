@@ -1,3 +1,8 @@
+import {
+  isMtProxyDisabled,
+  NET_STATS_CHANNEL_NAME,
+  notifyProxyConfigChanged,
+} from '../../lib/gramjs/extensions/PromisedWebSockets';
 import type { FC } from '../../lib/teact/teact';
 import React, {
   useCallback,
@@ -18,6 +23,7 @@ interface DiagnosticsResponse {
   txBytes: number;
   activeConnections: number;
   connectionsByDc: Record<string, number>;
+  proxyEnabled?: boolean;
   activeProxy: ProxyRecord;
   serverMemoryMb: number;
   uptimeSeconds: number;
@@ -203,6 +209,20 @@ const ProxySpeedTestFloater: FC = () => {
   const [txSpeed, setTxSpeed] = useState<number>(0);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsResponse | undefined>(undefined);
   const [diagError, setDiagError] = useState<string>('');
+  const [isProxyEnabled, setIsProxyEnabled] = useState<boolean>(() => !isMtProxyDisabled());
+  const [isTogglingMode, setIsTogglingMode] = useState<boolean>(false);
+  const [modeError, setModeError] = useState<string>('');
+  const [clientStats, setClientStats] = useState<{
+    rxBytes: number;
+    txBytes: number;
+    activeConnections: number;
+    connectionsByDc: Record<string, number>;
+  }>({
+    rxBytes: 0,
+    txBytes: 0,
+    activeConnections: 0,
+    connectionsByDc: {},
+  });
 
   // Speed Test state
   const [isSpeedTesting, setIsSpeedTesting] = useState<boolean>(false);
@@ -230,6 +250,13 @@ const ProxySpeedTestFloater: FC = () => {
   const lastRxBytesRef = useRef<number | undefined>(undefined);
   const lastTxBytesRef = useRef<number | undefined>(undefined);
   const lastStatsTimeRef = useRef<number | undefined>(undefined);
+  const clientRxBytesRef = useRef<number>(0);
+  const clientTxBytesRef = useRef<number>(0);
+  const lastClientRxBytesRef = useRef<number>(0);
+  const lastClientTxBytesRef = useRef<number>(0);
+  const speedHistoryRef = useRef<Array<{ t: number; dRx: number; dTx: number }>>([]);
+  const lastNonZeroRxTimeRef = useRef<number>(0);
+  const lastNonZeroTxTimeRef = useRef<number>(0);
   const speedAbortRef = useRef<AbortController | undefined>(undefined);
   const isSpeedTestingRef = useRef<boolean>(false);
 
@@ -263,8 +290,71 @@ const ProxySpeedTestFloater: FC = () => {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  // Subscribe to client-side WebSocket telemetry from PromisedWebSockets (works in both MTProxy & Direct/VPN modes)
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return undefined;
+    const channel = new BroadcastChannel(NET_STATS_CHANNEL_NAME);
+    channel.onmessage = (event) => {
+      const msg = event.data;
+      if (!msg) return;
+      if (msg.type === 'proxyModeChanged' && typeof msg.proxyDisabled === 'boolean') {
+        setIsProxyEnabled(!msg.proxyDisabled);
+      } else if (msg.type === 'clientNetStats') {
+        clientRxBytesRef.current = msg.rxBytes || 0;
+        clientTxBytesRef.current = msg.txBytes || 0;
+        setClientStats({
+          rxBytes: msg.rxBytes || 0,
+          txBytes: msg.txBytes || 0,
+          activeConnections: msg.activeConnections || 0,
+          connectionsByDc: msg.connectionsByDc || {},
+        });
+      }
+    };
+    return () => channel.close();
+  }, []);
+
+  const updateSmoothedThroughput = useCallback((now: number, backendDRx: number, backendDTx: number) => {
+    const clientDRx = Math.max(0, clientRxBytesRef.current - lastClientRxBytesRef.current);
+    const clientDTx = Math.max(0, clientTxBytesRef.current - lastClientTxBytesRef.current);
+    lastClientRxBytesRef.current = clientRxBytesRef.current;
+    lastClientTxBytesRef.current = clientTxBytesRef.current;
+
+    const dRx = Math.max(backendDRx, clientDRx);
+    const dTx = Math.max(backendDTx, clientDTx);
+
+    if (dRx > 0) lastNonZeroRxTimeRef.current = now;
+    if (dTx > 0) lastNonZeroTxTimeRef.current = now;
+
+    const windowMs = 3000;
+    speedHistoryRef.current.push({ t: now, dRx, dTx });
+    speedHistoryRef.current = speedHistoryRef.current.filter((item) => now - item.t <= windowMs);
+
+    const oldestTime = speedHistoryRef.current[0]?.t ?? (now - 1000);
+    const spanSec = Math.max(1, (now - oldestTime) / 1000);
+    const sumRx = speedHistoryRef.current.reduce((acc, s) => acc + s.dRx, 0);
+    const sumTx = speedHistoryRef.current.reduce((acc, s) => acc + s.dTx, 0);
+
+    const rollingRx = sumRx / spanSec;
+    const rollingTx = sumTx / spanSec;
+
+    if (!isSpeedTestingRef.current) {
+      if (now - lastNonZeroRxTimeRef.current > 2200) {
+        setRxSpeed(0);
+      } else {
+        setRxSpeed((prev) => (prev > 0 ? prev * 0.45 + rollingRx * 0.55 : rollingRx));
+      }
+    }
+
+    if (now - lastNonZeroTxTimeRef.current > 2200) {
+      setTxSpeed(0);
+    } else {
+      setTxSpeed((prev) => (prev > 0 ? prev * 0.45 + rollingTx * 0.55 : rollingTx));
+    }
+  }, []);
+
   // Poll /api/diagnostics every 1 second for live Rx/Tx speed & connection diagnostics
   const pollDiagnostics = useCallback(async () => {
+    const now = performance.now();
     try {
       const res = await fetch(`${MTPROXY_BRIDGE_HTTP}/api/diagnostics`, {
         headers: { Accept: 'application/json' },
@@ -273,27 +363,30 @@ const ProxySpeedTestFloater: FC = () => {
         throw new Error(`Diagnostics HTTP ${res.status}`);
       }
       const data = (await res.json()) as DiagnosticsResponse;
-      const now = performance.now();
 
+      if (typeof data.proxyEnabled === 'boolean') {
+        const nextDisabled = !data.proxyEnabled;
+        setIsProxyEnabled(data.proxyEnabled);
+        if (isMtProxyDisabled() !== nextDisabled) {
+          notifyProxyConfigChanged(nextDisabled, true);
+        }
+      }
+
+      let dRx = 0;
+      let dTx = 0;
       if (
         lastRxBytesRef.current !== undefined
         && lastTxBytesRef.current !== undefined
         && lastStatsTimeRef.current !== undefined
       ) {
-        const dt = (now - lastStatsTimeRef.current) / 1000;
-        if (dt > 0.1) {
-          const dRx = Math.max(0, data.rxBytes - lastRxBytesRef.current);
-          const dTx = Math.max(0, data.txBytes - lastTxBytesRef.current);
-          if (!isSpeedTestingRef.current) {
-            setRxSpeed(dRx / dt);
-          }
-          setTxSpeed(dTx / dt);
-        }
+        dRx = Math.max(0, data.rxBytes - lastRxBytesRef.current);
+        dTx = Math.max(0, data.txBytes - lastTxBytesRef.current);
       }
 
       lastRxBytesRef.current = data.rxBytes;
       lastTxBytesRef.current = data.txBytes;
       lastStatsTimeRef.current = now;
+      updateSmoothedThroughput(now, dRx, dTx);
       setDiagnostics(data);
       setDiagError('');
 
@@ -308,9 +401,10 @@ const ProxySpeedTestFloater: FC = () => {
         );
       }
     } catch (err: any) {
+      updateSmoothedThroughput(now, 0, 0);
       setDiagError(err?.message || 'Unable to reach proxy diagnostics service');
     }
-  }, [dcPingMs]);
+  }, [dcPingMs, updateSmoothedThroughput]);
 
   useEffect(() => {
     void pollDiagnostics();
@@ -573,12 +667,58 @@ const ProxySpeedTestFloater: FC = () => {
     }
   }, [isDcPinging, isChinese]);
 
+  const handleToggleProxyMode = useCallback(async () => {
+    if (isTogglingMode) return;
+    const nextEnabled = !isProxyEnabled;
+    setIsTogglingMode(true);
+    setModeError('');
+    try {
+      let bridgeError: string | undefined;
+      try {
+        const res = await fetch(`${MTPROXY_BRIDGE_HTTP}/api/proxies/mode`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: nextEnabled }),
+        });
+        if (!res.ok) {
+          bridgeError = `HTTP ${res.status}`;
+        }
+      } catch (err: any) {
+        bridgeError = err?.message || 'Network error';
+      }
+
+      if (bridgeError && nextEnabled) {
+        // MTProxy mode cannot work without the bridge, so stay in Direct / VPN mode and say why
+        setModeError(isChinese
+          ? `无法开启 MTProto 代理：代理桥接服务不可用 (${bridgeError})`
+          : `Could not enable MTProto Proxy: proxy bridge is unreachable (${bridgeError})`);
+        return;
+      }
+
+      if (bridgeError) {
+        // Direct / VPN mode does not need the bridge, so switch locally but tell the user it was not saved
+        setModeError(isChinese
+          ? `已在本机切换至 VPN 直连，但代理桥接服务不可用，设置未保存到服务器 (${bridgeError})`
+          : `Switched to Direct / VPN locally, but the proxy bridge is unreachable so it was not saved (${
+            bridgeError
+          })`);
+      }
+
+      setIsProxyEnabled(nextEnabled);
+      notifyProxyConfigChanged(!nextEnabled, true);
+      void pollDiagnostics();
+    } finally {
+      setIsTogglingMode(false);
+    }
+  }, [isProxyEnabled, isTogglingMode, isChinese, pollDiagnostics]);
+
   // Active latency display on the 70x70 floater button
   const proxyLatency = diagnostics?.activeProxy?.latencyMs;
   const activeLatency = dcPingMs ?? (typeof proxyLatency === 'number' ? proxyLatency : undefined);
   const isProxyOnline = diagnostics?.activeProxy?.isOnline ?? false;
 
   const getLatencyColorClass = (ms: number | undefined, online = true) => {
+    if (!isProxyEnabled) return styles.colorCyan;
     if (!online || ms === undefined) return styles.colorRed;
     if (ms < 150) return styles.colorGreen;
     if (ms < 350) return styles.colorYellow;
@@ -586,6 +726,9 @@ const ProxySpeedTestFloater: FC = () => {
   };
 
   const renderFloaterPingText = () => {
+    if (!isProxyEnabled) {
+      return isChinese ? '直连 VPN' : 'Direct';
+    }
     const prefix = isChinese ? '延迟:' : 'Ping:';
     if (!diagnostics && diagError) {
       return `${prefix} Off`;
@@ -627,8 +770,17 @@ const ProxySpeedTestFloater: FC = () => {
     return isChinese ? '准备测速' : 'Ready to test';
   };
 
-  const dcChannelsSummary = diagnostics?.connectionsByDc
-    ? Object.entries(diagnostics.connectionsByDc)
+  const effectiveConnectionsByDc = isProxyEnabled && (diagnostics?.activeConnections || 0) > 0
+    ? diagnostics!.connectionsByDc
+    : clientStats.connectionsByDc;
+  const effectiveActiveConnections = isProxyEnabled
+    ? Math.max(diagnostics?.activeConnections || 0, clientStats.activeConnections || 0)
+    : clientStats.activeConnections;
+  const effectiveRxBytes = Math.max(diagnostics?.rxBytes || 0, clientStats.rxBytes || 0);
+  const effectiveTxBytes = Math.max(diagnostics?.txBytes || 0, clientStats.txBytes || 0);
+
+  const dcChannelsSummary = effectiveConnectionsByDc
+    ? Object.entries(effectiveConnectionsByDc)
       .map(([dc, count]) => `${dc}:${count}`)
       .join(', ')
     : '';
@@ -938,12 +1090,24 @@ const ProxySpeedTestFloater: FC = () => {
                 <div className={styles.diagBox}>
                   <div className={styles.diagRow}>
                     <span className={styles.diagLabel}>
+                      {isChinese ? '连接模式:' : 'Connection Mode:'}
+                    </span>
+                    <span className={`${styles.diagValue} ${isProxyEnabled ? styles.colorGreen : styles.colorCyan}`}>
+                      {isProxyEnabled
+                        ? (isChinese ? 'MTProto 代理桥接' : 'MTProto Proxy Bridge')
+                        : (isChinese ? '直连模式 (VPN / Direct)' : 'Direct Mode (VPN)')}
+                    </span>
+                  </div>
+                  <div className={styles.diagRow}>
+                    <span className={styles.diagLabel}>
                       {isChinese ? '当前节点 IP:' : 'Active Server IP:'}
                     </span>
                     <span className={styles.diagValue}>
-                      {diagnostics?.activeProxy
-                        ? `${diagnostics.activeProxy.host}:${diagnostics.activeProxy.port}`
-                        : '—'}
+                      {!isProxyEnabled
+                        ? 'wss://zws1..5.web.telegram.org'
+                        : diagnostics?.activeProxy
+                          ? `${diagnostics.activeProxy.host}:${diagnostics.activeProxy.port}`
+                          : '—'}
                     </span>
                   </div>
                   <div className={styles.diagRow}>
@@ -952,14 +1116,20 @@ const ProxySpeedTestFloater: FC = () => {
                     </span>
                     <span
                       className={`${styles.diagValue} ${
-                        diagnostics?.activeProxy?.isOnline ? styles.colorGreen : styles.colorRed
+                        !isProxyEnabled
+                          ? styles.colorCyan
+                          : diagnostics?.activeProxy?.isOnline
+                            ? styles.colorGreen
+                            : styles.colorRed
                       }`}
                     >
-                      {diagnostics?.activeProxy
-                        ? (diagnostics.activeProxy.isOnline
-                          ? (isChinese ? '在线 (Obfuscated2)' : 'Online (Obfuscated2)')
-                          : (isChinese ? '离线' : 'Offline'))
-                        : '—'}
+                      {!isProxyEnabled
+                        ? (isChinese ? '已手动关闭 (VPN 直连)' : 'Manually Off (Direct / VPN)')
+                        : diagnostics?.activeProxy
+                          ? (diagnostics.activeProxy.isOnline
+                            ? (isChinese ? '在线 (Obfuscated2)' : 'Online (Obfuscated2)')
+                            : (isChinese ? '离线' : 'Offline'))
+                          : '—'}
                     </span>
                   </div>
                   <div className={styles.diagRow}>
@@ -967,9 +1137,7 @@ const ProxySpeedTestFloater: FC = () => {
                       {isChinese ? '活跃并发通道:' : 'Active WS Channels:'}
                     </span>
                     <span className={styles.diagValue}>
-                      {diagnostics
-                        ? `${diagnostics.activeConnections}${dcChannelsSummary ? ` (${dcChannelsSummary})` : ''}`
-                        : '0'}
+                      {`${effectiveActiveConnections}${dcChannelsSummary ? ` (${dcChannelsSummary})` : ''}`}
                     </span>
                   </div>
                   <div className={styles.diagRow}>
@@ -977,9 +1145,7 @@ const ProxySpeedTestFloater: FC = () => {
                       {isChinese ? '累计转发流量:' : 'Total Relayed:'}
                     </span>
                     <span className={styles.diagValue}>
-                      {diagnostics
-                        ? `↓ ${formatTotalBytes(diagnostics.rxBytes)} / ↑ ${formatTotalBytes(diagnostics.txBytes)}`
-                        : '↓ 0.0 KB / ↑ 0.0 KB'}
+                      {`↓ ${formatTotalBytes(effectiveRxBytes)} / ↑ ${formatTotalBytes(effectiveTxBytes)}`}
                     </span>
                   </div>
                   <div className={styles.diagRow}>
@@ -1004,6 +1170,23 @@ const ProxySpeedTestFloater: FC = () => {
                     </div>
                   </div>
                 </div>
+                <button
+                  type="button"
+                  className={`${styles.actionButton} ${
+                    isProxyEnabled ? styles.btnProxyToggleOff : styles.btnProxyToggleOn
+                  }`}
+                  disabled={isTogglingMode}
+                  onClick={handleToggleProxyMode}
+                >
+                  {isProxyEnabled
+                    ? (isChinese ? '关闭 MTProto 代理 (切换至 VPN 直连)' : 'Turn Off Proxy (Use Direct / VPN)')
+                    : (isChinese ? '开启 MTProto 代理桥接' : 'Enable MTProto Proxy')}
+                </button>
+                {modeError && (
+                  <div className={styles.errorBanner}>
+                    {modeError}
+                  </div>
+                )}
               </div>
             </div>
           </div>

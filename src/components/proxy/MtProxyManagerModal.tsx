@@ -1,4 +1,8 @@
 import type { FormEvent } from 'react';
+import {
+  isMtProxyDisabled,
+  notifyProxyConfigChanged,
+} from '../../lib/gramjs/extensions/PromisedWebSockets';
 import type { FC } from '../../lib/teact/teact';
 import React, { useCallback, useEffect, useState } from '../../lib/teact/teact';
 
@@ -19,6 +23,7 @@ export interface MtProxyManagerModalProps {
 const MtProxyManagerModal: FC<MtProxyManagerModalProps> = ({ isOpen, onClose }) => {
   const [proxies, setProxies] = useState<ProxyRecord[]>([]);
   const [activeId, setActiveId] = useState<string>('');
+  const [isProxyEnabled, setIsProxyEnabled] = useState<boolean>(() => !isMtProxyDisabled());
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [apiError, setApiError] = useState<string>('');
   const [apiSuccess, setApiSuccess] = useState<string>('');
@@ -51,6 +56,13 @@ const MtProxyManagerModal: FC<MtProxyManagerModalProps> = ({ isOpen, onClose }) 
 
       setProxies(data.proxies);
       setActiveId(data.activeId);
+      if (typeof data.proxyEnabled === 'boolean') {
+        const nextDisabled = !data.proxyEnabled;
+        setIsProxyEnabled(data.proxyEnabled);
+        if (isMtProxyDisabled() !== nextDisabled) {
+          notifyProxyConfigChanged(nextDisabled, true);
+        }
+      }
       setApiError('');
     } catch (err: any) {
       setApiError(err?.message || 'Error communicating with proxy service');
@@ -65,6 +77,52 @@ const MtProxyManagerModal: FC<MtProxyManagerModalProps> = ({ isOpen, onClose }) 
     const interval = setInterval(syncProxies, 5000);
     return () => clearInterval(interval);
   }, [isOpen, syncProxies]);
+
+  // Toggle MTProxy ON vs OFF (Direct / VPN mode)
+  const handleToggleProxyMode = async (nextEnabled: boolean) => {
+    setIsLoading(true);
+    setApiError('');
+    setApiSuccess('');
+    try {
+      let bridgeWarning = '';
+      try {
+        const res = await fetch(`${MTPROXY_BRIDGE_HTTP}/api/proxies/mode`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: nextEnabled }),
+        });
+        if (!res.ok) {
+          const body = await res.json();
+          throw new Error(body.error || `Failed to update proxy mode (${res.status})`);
+        }
+      } catch (err: any) {
+        if (nextEnabled) {
+          throw err;
+        }
+        // Direct / VPN mode does not need the bridge, so switch locally but tell the user it was not saved
+        bridgeWarning = ` Warning: the proxy bridge is unreachable, so this setting was only applied locally (${
+          err?.message || 'network error'
+        }).`;
+      }
+
+      setIsProxyEnabled(nextEnabled);
+      notifyProxyConfigChanged(!nextEnabled, true);
+      if (bridgeWarning) {
+        setApiError(`MTProto Proxy turned OFF (Direct / VPN Mode).${bridgeWarning}`);
+      } else {
+        setApiSuccess(
+          nextEnabled
+            ? 'MTProto Proxy enabled. Reconnecting Telegram channels via MTProxy bridge...'
+            : 'MTProto Proxy turned OFF. Reconnecting directly to Telegram WebSockets (Direct / VPN Mode)...',
+        );
+        await syncProxies();
+      }
+    } catch (err: any) {
+      setApiError(err?.message || 'Could not switch proxy connection mode');
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   // Set active proxy handler
   const handleSetActive = async (id: string) => {
@@ -84,7 +142,9 @@ const MtProxyManagerModal: FC<MtProxyManagerModalProps> = ({ isOpen, onClose }) 
       }
 
       setActiveId(id);
-      setApiSuccess(`Switched active proxy successfully.`);
+      setIsProxyEnabled(true);
+      notifyProxyConfigChanged(false, true);
+      setApiSuccess('Switched active proxy and reconnected Telegram channels.');
       await syncProxies();
     } catch (err: any) {
       setApiError(err?.message || 'Could not switch active proxy');
@@ -231,41 +291,69 @@ const MtProxyManagerModal: FC<MtProxyManagerModalProps> = ({ isOpen, onClose }) 
               </div>
             )}
 
-            {/* Active Proxy Banner */}
+            {/* Active Proxy / Direct Mode Banner */}
             {activeProxy && (
               <div className={styles.activeBanner}>
                 <div className={styles.activeBannerInfo}>
-                  <div className={styles.activeBannerTitle}>Active MTProto Proxy</div>
+                  <div className={styles.activeBannerTitle}>
+                    {isProxyEnabled ? 'Active MTProto Proxy' : 'Proxy Disabled (Direct / VPN Mode)'}
+                  </div>
                   <div className={styles.activeBannerEndpoint}>
                     <span
                       className={`${styles.statusDot} ${
-                        activeProxy.isOnline
-                          ? (activeProxy.latencyMs || 0) < 300
-                            ? styles.dotGreen
-                            : styles.dotYellow
-                          : styles.dotRed
+                        !isProxyEnabled
+                          ? styles.dotBlue
+                          : activeProxy.isOnline
+                            ? (activeProxy.latencyMs || 0) < 300
+                              ? styles.dotGreen
+                              : styles.dotYellow
+                            : styles.dotRed
                       }`}
                     />
-                    <span>{`${activeProxy.host}:${activeProxy.port}`}</span>
+                    <span>
+                      {isProxyEnabled
+                        ? `${activeProxy.host}:${activeProxy.port}`
+                        : 'Direct Telegram WebSocket (wss://zws1..5.web.telegram.org)'}
+                    </span>
                   </div>
                   <div className={styles.activeBannerMeta}>
-                    <span>
-                      Secret:
-                      {maskSecret(activeProxy.secret)}
-                    </span>
-                    <span>
-                      Status:
-                      {activeProxy.isOnline ? 'Online' : 'Offline'}
-                    </span>
+                    {isProxyEnabled ? (
+                      <>
+                        <span>
+                          Secret:
+                          {maskSecret(activeProxy.secret)}
+                        </span>
+                        <span>
+                          Status:
+                          {activeProxy.isOnline ? 'Online' : 'Offline'}
+                        </span>
+                      </>
+                    ) : (
+                      <span>
+                        Bypassing MTProxy bridge — connects directly via local network / VPN
+                      </span>
+                    )}
                   </div>
                 </div>
 
-                <div className={styles.activeBannerLatency}>
-                  <span className={getLatencyClass(activeProxy)}>
-                    {activeProxy.isOnline && typeof activeProxy.latencyMs === 'number'
-                      ? `${activeProxy.latencyMs}ms`
-                      : 'Offline'}
-                  </span>
+                <div className={styles.activeBannerRight}>
+                  {isProxyEnabled && (
+                    <div className={styles.activeBannerLatency}>
+                      <span className={getLatencyClass(activeProxy)}>
+                        {activeProxy.isOnline && typeof activeProxy.latencyMs === 'number'
+                          ? `${activeProxy.latencyMs}ms`
+                          : 'Offline'}
+                      </span>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className={isProxyEnabled ? styles.btnToggleModeOff : styles.btnToggleModeOn}
+                    onClick={() => handleToggleProxyMode(!isProxyEnabled)}
+                    disabled={isLoading}
+                  >
+                    {isProxyEnabled ? 'Turn Off Proxy (Direct / VPN)' : 'Enable MTProto Proxy'}
+                  </button>
                 </div>
               </div>
             )}
@@ -287,7 +375,7 @@ const MtProxyManagerModal: FC<MtProxyManagerModalProps> = ({ isOpen, onClose }) 
                   </thead>
                   <tbody>
                     {proxies.map((proxy) => {
-                      const isCurrent = proxy.id === activeId;
+                      const isCurrent = isProxyEnabled && proxy.id === activeId;
                       return (
                         <tr key={proxy.id}>
                           <td><strong>{proxy.host}</strong></td>

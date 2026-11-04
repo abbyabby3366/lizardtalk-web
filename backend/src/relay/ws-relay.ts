@@ -28,6 +28,7 @@ class RelayStatsTracker {
   public txBytes = 0;
   public activeConnections = 0;
   private dcCounts = new Map<number, number>();
+  private activeSockets = new Set<WebSocket>();
 
   public recordRx(bytes: number): void {
     if (bytes > 0) {
@@ -41,12 +42,15 @@ class RelayStatsTracker {
     }
   }
 
-  public onConnect(dcId: number): void {
+  public onConnect(dcId: number, ws?: WebSocket): void {
     this.activeConnections += 1;
     this.dcCounts.set(dcId, (this.dcCounts.get(dcId) || 0) + 1);
+    if (ws) {
+      this.activeSockets.add(ws);
+    }
   }
 
-  public onDisconnect(dcId: number): void {
+  public onDisconnect(dcId: number, ws?: WebSocket): void {
     this.activeConnections = Math.max(0, this.activeConnections - 1);
     const current = this.dcCounts.get(dcId) || 0;
     if (current <= 1) {
@@ -54,6 +58,22 @@ class RelayStatsTracker {
     } else {
       this.dcCounts.set(dcId, current - 1);
     }
+    if (ws) {
+      this.activeSockets.delete(ws);
+    }
+  }
+
+  public closeAllConnections(reason = 'Proxy configuration changed'): void {
+    for (const ws of Array.from(this.activeSockets)) {
+      try {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close(1012, reason);
+        }
+      } catch {
+        // Ignore close error
+      }
+    }
+    this.activeSockets.clear();
   }
 
   public getSnapshot(): RelayStatsSnapshot {
@@ -145,7 +165,7 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
     }
 
     let isCleanedUp = false;
-    relayStats.onConnect(dcId);
+    relayStats.onConnect(dcId, ws);
 
     // Connect to active MTProxy TCP endpoint
     tcpSocket = net.createConnection(
@@ -183,19 +203,32 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
     tcpSocket.setNoDelay(true);
 
     // Inbound from MTProxy TCP socket -> Client WebSocket
+    const WS_HIGH_WATER_MARK = 2 * 1024 * 1024;
     tcpSocket.on('data', (chunk: Buffer) => {
       relayStats.recordRx(chunk.length);
       if (ws.readyState === WebSocket.OPEN) {
+        let payload: Buffer = chunk;
         if (!isRaw && decryptCipher) {
           try {
-            const decrypted = decryptCipher.update(chunk);
-            ws.send(decrypted, { binary: true });
+            payload = decryptCipher.update(chunk);
           } catch (err: any) {
             console.error('[WSRelay] Decryption error:', err.message);
             cleanup();
+            return;
           }
+        }
+
+        if (ws.bufferedAmount > WS_HIGH_WATER_MARK && tcpSocket && !tcpSocket.isPaused()) {
+          tcpSocket.pause();
+        }
+        if (tcpSocket && tcpSocket.isPaused()) {
+          ws.send(payload, { binary: true }, () => {
+            if (tcpSocket && tcpSocket.isPaused() && ws.bufferedAmount < WS_HIGH_WATER_MARK) {
+              tcpSocket.resume();
+            }
+          });
         } else {
-          ws.send(chunk, { binary: true });
+          ws.send(payload, { binary: true });
         }
       }
     });
@@ -220,11 +253,15 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
 
       try {
         relayStats.recordTx(buf.length);
-        if (!isRaw && encryptCipher) {
-          const encrypted = encryptCipher.update(buf);
-          tcpSocket.write(encrypted);
-        } else {
-          tcpSocket.write(buf);
+        const outBuf = !isRaw && encryptCipher ? encryptCipher.update(buf) : buf;
+        const flushed = tcpSocket.write(outBuf);
+        if (!flushed) {
+          ws.pause();
+          tcpSocket.once('drain', () => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.resume();
+            }
+          });
         }
       } catch (err: any) {
         console.error('[WSRelay] TCP write error:', err.message);
@@ -235,7 +272,7 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
     const cleanup = () => {
       if (!isCleanedUp) {
         isCleanedUp = true;
-        relayStats.onDisconnect(dcId);
+        relayStats.onDisconnect(dcId, ws);
       }
       if (tcpSocket) {
         tcpSocket.removeAllListeners();

@@ -22,12 +22,14 @@ export interface ProxyRecord {
 
 export interface ProxyState {
   activeId: string;
+  proxyEnabled?: boolean;
   proxies: ProxyRecord[];
 }
 
 export class ProxyPool {
   private proxies: Map<string, ProxyRecord> = new Map();
   private activeId: string = 'default-primary';
+  private proxyEnabled: boolean = true;
   private dataFilePath: string;
 
   constructor(customDataDir?: string) {
@@ -51,6 +53,7 @@ export class ProxyPool {
             this.proxies.set(p.id, p);
           }
           this.activeId = parsed.activeId || 'default-primary';
+          this.proxyEnabled = parsed.proxyEnabled !== false;
           return;
         }
       } catch (err) {
@@ -166,9 +169,20 @@ export class ProxyPool {
   public persist(): void {
     const state: ProxyState = {
       activeId: this.activeId,
+      proxyEnabled: this.proxyEnabled,
       proxies: Array.from(this.proxies.values()),
     };
     fs.writeFileSync(this.dataFilePath, JSON.stringify(state, null, 2), 'utf8');
+  }
+
+  public isProxyEnabled(): boolean {
+    return this.proxyEnabled;
+  }
+
+  public setProxyEnabled(enabled: boolean): boolean {
+    this.proxyEnabled = Boolean(enabled);
+    this.persist();
+    return this.proxyEnabled;
   }
 
   public getAllProxies(): ProxyRecord[] {
@@ -246,6 +260,7 @@ export class ProxyPool {
       p.updatedAt = new Date().toISOString();
     }
     this.activeId = id;
+    this.proxyEnabled = true;
     this.persist();
     return target;
   }

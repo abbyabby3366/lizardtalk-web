@@ -17,5 +17,6 @@ export interface ProxyRecord {
 
 export interface ProxyListResponse {
   activeId: string;
+  proxyEnabled?: boolean;
   proxies: ProxyRecord[];
 }

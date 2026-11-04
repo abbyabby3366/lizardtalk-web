@@ -118,9 +118,16 @@ const Video = <T,>({
     wasIntersectedRef.current = true;
   }
 
-  const [isLoadAllowed, setIsLoadAllowed] = useState(canAutoLoad);
+  const isLargeOrLongVideo = !isPaidPreview
+    && !video.isGif
+    && !video.isRound
+    && ((video.duration || 0) > 60 || video.size > 15 * 1024 * 1024);
+
+  const [isLoadAllowed, setIsLoadAllowed] = useState(Boolean(canAutoLoad && !isLargeOrLongVideo));
   const shouldLoad = Boolean(isLoadAllowed && isIntersectingForLoading && !isPaidPreview);
-  const [isPlayAllowed, setIsPlayAllowed] = useState(Boolean(canAutoPlay && !isSpoilerShown));
+  const [isPlayAllowed, setIsPlayAllowed] = useState(
+    Boolean(canAutoPlay && !isSpoilerShown && !isLargeOrLongVideo),
+  );
 
   const fullMediaHash = !isPaidPreview ? getVideoMediaHash(video, 'inline') : undefined;
   const [isFullMediaPreloaded] = useState(Boolean(fullMediaHash && mediaLoader.getFromMemory(fullMediaHash)));
@@ -178,7 +185,9 @@ const Video = <T,>({
   const {
     ref: playButtonRef,
   } = useShowTransition({
-    isOpen: Boolean((isLoadAllowed || fullMediaData) && !isPlayAllowed && !shouldRenderSpinner),
+    isOpen: Boolean(
+      (isLargeOrLongVideo || isLoadAllowed || fullMediaData) && !isPlayAllowed && !shouldRenderSpinner,
+    ),
   });
   const {
     ref: transferProgressRef,
@@ -213,12 +222,15 @@ const Video = <T,>({
       return;
     }
 
-    if (!fullMediaData) {
+    // Large/long videos never stream inline in the bubble; they open in the Media Viewer instead
+    const shouldStreamInline = !(isLargeOrLongVideo && onClick);
+
+    if (shouldStreamInline && !fullMediaData) {
       setIsLoadAllowed((isAllowed) => !isAllowed);
       return;
     }
 
-    if (fullMediaData && !isPlayAllowed) {
+    if (shouldStreamInline && fullMediaData && !isPlayAllowed) {
       setIsPlayAllowed(true);
     }
 
@@ -232,6 +244,11 @@ const Video = <T,>({
         return;
       }
       hideSpoiler();
+      return;
+    }
+
+    if (!shouldStreamInline) {
+      onClick?.(clickArg!, e);
       return;
     }
 
@@ -325,7 +342,7 @@ const Video = <T,>({
           />
         </div>
       )}
-      {!isLoadAllowed && !fullMediaData && (
+      {!isLoadAllowed && !fullMediaData && !isLargeOrLongVideo && (
         <Icon name="download" className={buildClassName(mediaStyles.controlButton, mediaStyles.downloadButton)} />
       )}
       {shouldRenderTransferProgress ? (

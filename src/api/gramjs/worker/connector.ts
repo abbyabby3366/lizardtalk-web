@@ -89,6 +89,13 @@ export function initApi(onUpdate: OnApiUpdate, initialArgs: ApiInitialArgs) {
     if (ACCOUNT_SLOT) {
       params.set('account', String(ACCOUNT_SLOT));
     }
+    try {
+      if (typeof localStorage !== 'undefined' && localStorage.getItem('lizardtalk_proxy_disabled') === '1') {
+        params.set('proxyDisabled', '1');
+      }
+    } catch {
+      // Ignore storage access errors
+    }
 
     worker = new Worker(new URL('./worker.ts', import.meta.url), {
       name: params.toString(),
