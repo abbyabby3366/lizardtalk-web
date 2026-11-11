@@ -146,6 +146,8 @@ export default class PromisedWebSockets {
 
   private connectedDcId?: number;
 
+  private disconnect?: () => void;
+
   public isDirectConnection = false;
 
   constructor(disconnectedCallback: () => void) {
@@ -156,7 +158,9 @@ export default class PromisedWebSockets {
   }
 
   async readExactly(number: number) {
+    const client = this.client;
     const firstChunk = await this.read(number);
+    if (this.closed || this.client !== client) throw closeError;
     if (firstChunk.length === number) {
       return firstChunk;
     }
@@ -167,6 +171,7 @@ export default class PromisedWebSockets {
 
     while (offset < number) {
       const thisTime = await this.read(number - offset);
+      if (this.closed || this.client !== client) throw closeError;
       readData.set(thisTime, offset);
       offset += thisTime.length;
     }
@@ -175,11 +180,12 @@ export default class PromisedWebSockets {
   }
 
   async read(number: number) {
+    const client = this.client;
     if (this.closed) {
       throw closeError;
     }
-    await this.canRead;
-    if (this.closed) {
+    const ready = await this.canRead;
+    if (!ready || this.closed || this.client !== client) {
       throw closeError;
     }
     const toReturn = this.takeBytes(Math.min(number, this.availableBytes));
@@ -193,7 +199,8 @@ export default class PromisedWebSockets {
   }
 
   async readAll() {
-    if (this.closed || !await this.canRead) {
+    const client = this.client;
+    if (this.closed || !await this.canRead || this.closed || this.client !== client) {
       throw closeError;
     }
     const toReturn = this.takeBytes(this.availableBytes);
@@ -221,7 +228,9 @@ export default class PromisedWebSockets {
 
     const first = this.chunks[0];
     if (first.length >= count) {
-      const result = first.slice(0, count);
+      // A fully consumed chunk is exclusively owned by the reader. Partial reads
+      // still copy so a small retained header cannot pin a large receive buffer.
+      const result = first.length === count ? first : first.slice(0, count);
       if (first.length === count) {
         this.chunks.shift();
       } else {
@@ -271,6 +280,7 @@ export default class PromisedWebSockets {
   }
 
   connect(port: number, ip: string, isTestServer = false, isPremium = false, dcId = 2) {
+    this.close();
     this.resetBuffer();
     this.canRead = new Promise((resolve) => {
       this.resolveRead = resolve;
@@ -279,43 +289,36 @@ export default class PromisedWebSockets {
     this.website = this.getWebSocketLink(ip, port, isTestServer, isPremium, dcId);
     this.client = new WebSocket(this.website, 'binary');
     this.client.binaryType = 'arraybuffer';
+    const client = this.client;
     activeSockets.add(this);
     const isMedia = ip.includes('-1') || dcId < 0;
     const signedDcId = isMedia ? -Math.abs(dcId) : Math.abs(dcId);
 
     return new Promise((resolve, reject) => {
-      if (!this.client) return;
       let hasResolved = false;
+      let finished = false;
       let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
 
-      this.client.onopen = () => {
-        this.connectedDcId = signedDcId;
-        clientActiveConnections += 1;
-        clientDcCounts.set(signedDcId, (clientDcCounts.get(signedDcId) || 0) + 1);
-        scheduleNetStatsBroadcast();
-        this.receive();
-        resolve(this);
-        hasResolved = true;
+      const onOffline = () => this.close();
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        this.disconnect = undefined;
         if (timeout) clearTimeout(timeout);
-      };
-
-      this.client.onerror = (error) => {
+        self.removeEventListener('offline', onOffline);
+        // DOM event handlers use null to remove the callback.
+        /* eslint-disable no-null/no-null */
+        client.onopen = null;
+        client.onerror = null;
+        client.onclose = null;
+        client.onmessage = null;
+        /* eslint-enable no-null/no-null */
         activeSockets.delete(this);
-        // eslint-disable-next-line no-console
-        console.error('WebSocket error', error);
-        reject(error);
-        hasResolved = true;
-        if (timeout) clearTimeout(timeout);
-      };
 
-      this.client.onclose = (event) => {
-        activeSockets.delete(this);
-        const { code, reason, wasClean } = event;
-        if (code !== 1000) {
-          // eslint-disable-next-line no-console
-          console.error(`Socket ${ip} closed. Code: ${code}, reason: ${reason}, was clean: ${wasClean}`);
+        if (!hasResolved) {
+          reject(closeError);
+          hasResolved = true;
         }
-
         if (this.connectedDcId !== undefined) {
           const dc = this.connectedDcId;
           this.connectedDcId = undefined;
@@ -329,84 +332,89 @@ export default class PromisedWebSockets {
           scheduleNetStatsBroadcast();
         }
 
-        this.resolveRead?.(false);
         this.closed = true;
-        if (this.disconnectedCallback) {
+        this.resolveRead?.(false);
+        this.resetBuffer();
+        try {
+          client.close();
+        } finally {
           this.disconnectedCallback();
         }
+      };
+      this.disconnect = finish;
+
+      client.onopen = () => {
+        if (finished) return;
+        this.timeout = CONNECTION_TIMEOUT;
+        this.connectedDcId = signedDcId;
+        clientActiveConnections += 1;
+        clientDcCounts.set(signedDcId, (clientDcCounts.get(signedDcId) || 0) + 1);
+        scheduleNetStatsBroadcast();
+        this.receive();
+        resolve(this);
         hasResolved = true;
         if (timeout) clearTimeout(timeout);
+      };
+
+      client.onerror = (error) => {
+        // eslint-disable-next-line no-console
+        console.error('WebSocket error', error);
+        reject(error);
+        hasResolved = true;
+        finish();
+      };
+
+      client.onclose = (event) => {
+        const { code, reason, wasClean } = event;
+        if (code !== 1000) {
+          // eslint-disable-next-line no-console
+          console.error(`Socket ${ip} closed. Code: ${code}, reason: ${reason}, was clean: ${wasClean}`);
+        }
+
+        finish();
       };
 
       timeout = setTimeout(() => {
         if (hasResolved) return;
 
-        activeSockets.delete(this);
         reject(new Error('WebSocket connection timeout'));
-        this.resolveRead?.(false);
-        this.closed = true;
-        if (this.disconnectedCallback) {
-          this.disconnectedCallback();
-        }
-        this.client?.close();
+        hasResolved = true;
         this.timeout *= 2;
         this.timeout = Math.min(this.timeout, MAX_TIMEOUT);
         timeout = undefined;
+        finish();
       }, this.timeout);
 
-      // CONTEST
-      // Seems to not be working, at least in a web worker
-
-      self.addEventListener('offline', () => {
-        this.close();
-        this.resolveRead?.(false);
-      });
+      self.addEventListener('offline', onOffline);
     });
   }
 
   write(data: Uint8Array) {
-    if (this.closed) {
+    if (this.closed || this.client?.readyState !== WebSocket.OPEN) {
       throw closeError;
     }
+    // WebSocket.send snapshots the view; avoid another full packet copy here.
+    const payload = data.buffer instanceof ArrayBuffer
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      : new Uint8Array(data);
+    this.client.send(payload);
     clientTxBytes += data.byteLength;
     scheduleNetStatsBroadcast();
-    this.client?.send(new Uint8Array(data));
   }
 
   close() {
-    activeSockets.delete(this);
-    this.client?.close();
-    this.closed = true;
+    this.disconnect?.();
   }
 
   forceDisconnectForReconnect() {
-    activeSockets.delete(this);
-    if (this.connectedDcId !== undefined) {
-      const dc = this.connectedDcId;
-      this.connectedDcId = undefined;
-      clientActiveConnections = Math.max(0, clientActiveConnections - 1);
-      const count = clientDcCounts.get(dc) || 0;
-      if (count <= 1) {
-        clientDcCounts.delete(dc);
-      } else {
-        clientDcCounts.set(dc, count - 1);
-      }
-    }
-    this.closed = true;
-    this.resolveRead?.(false);
-    if (this.disconnectedCallback) {
-      this.disconnectedCallback();
-    }
-    try {
-      this.client?.close();
-    } catch {
-      // Ignore close error
-    }
+    this.close();
   }
 
   receive() {
     if (!this.client) return;
-    this.client.onmessage = async (message) => {
+    const client = this.client;
+    client.onmessage = async (message) => {
+      if (this.closed || this.client !== client) return;
       if (message.data instanceof ArrayBuffer) {
         const data = new Uint8Array(message.data);
         clientRxBytes += data.byteLength;
@@ -417,6 +425,7 @@ export default class PromisedWebSockets {
       }
       await this.mutex.runExclusive(async () => {
         const data = new Uint8Array(await new Response(message.data).arrayBuffer());
+        if (this.closed || this.client !== client) return;
         clientRxBytes += data.byteLength;
         scheduleNetStatsBroadcast();
         this.pushChunk(data);
