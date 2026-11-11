@@ -142,14 +142,28 @@ export async function checkProxyHealth(
 /**
  * Health check manager that periodically checks all proxies in the pool
  * and triggers auto-failover if the active proxy fails.
+ *
+ * The active proxy is checked every cycle. Proxies that keep failing are re-checked with
+ * exponential backoff (capped) so dead backups don't open a burst of TCP probes every cycle
+ * alongside live media streaming.
  */
+const DEAD_PROXY_BACKOFF_START_FAILS = 3;
+const DEAD_PROXY_MAX_BACKOFF_MS = 5 * 60 * 1000;
+
 export class HealthCheckManager {
   private pool: ProxyPool;
   private intervalTimer: NodeJS.Timeout | null = null;
   private isChecking: boolean = false;
+  private intervalMs: number = 10000;
+  private nextCheckAt = new Map<string, number>();
 
   constructor(pool: ProxyPool) {
     this.pool = pool;
+  }
+
+  private getBackoffMs(failCount: number): number {
+    const exponent = Math.min(failCount - DEAD_PROXY_BACKOFF_START_FAILS, 10);
+    return Math.min(this.intervalMs * 2 ** exponent, DEAD_PROXY_MAX_BACKOFF_MS);
   }
 
   public async runHealthCheckCycle(): Promise<void> {
@@ -157,7 +171,13 @@ export class HealthCheckManager {
     this.isChecking = true;
 
     try {
-      const proxies = this.pool.getAllProxies();
+      const now = Date.now();
+      const activeId = this.pool.getActiveProxy().id;
+      const proxies = this.pool.getAllProxies().filter((proxy) => (
+        proxy.id === activeId
+        || proxy.failCount < DEAD_PROXY_BACKOFF_START_FAILS
+        || now >= (this.nextCheckAt.get(proxy.id) ?? 0)
+      ));
       const results = await Promise.all(
         proxies.map(async (proxy) => ({
           id: proxy.id,
@@ -172,6 +192,12 @@ export class HealthCheckManager {
           result.latencyMs,
           result.error
         );
+        const updated = this.pool.getProxyById(id);
+        if (updated && updated.failCount >= DEAD_PROXY_BACKOFF_START_FAILS) {
+          this.nextCheckAt.set(id, Date.now() + this.getBackoffMs(updated.failCount));
+        } else {
+          this.nextCheckAt.delete(id);
+        }
       }
 
       // Check if active proxy needs failover
@@ -185,6 +211,7 @@ export class HealthCheckManager {
 
   public start(intervalMs: number = 10000): void {
     if (this.intervalTimer) return;
+    this.intervalMs = intervalMs;
 
     // Run first cycle immediately in background
     this.runHealthCheckCycle().catch(console.error);

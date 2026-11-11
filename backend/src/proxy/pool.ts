@@ -302,6 +302,8 @@ export class ProxyPool {
     const proxy = this.proxies.get(id);
     if (!proxy) return;
 
+    const statusChanged = proxy.isOnline !== isOnline || proxy.error !== error;
+
     proxy.isOnline = isOnline;
     proxy.latencyMs = latencyMs;
     proxy.lastChecked = new Date().toISOString(); // Full ISO 8601 string
@@ -315,7 +317,11 @@ export class ProxyPool {
       proxy.error = error;
     }
 
-    this.persist();
+    // Synchronous disk writes block the event loop that is relaying live media traffic,
+    // so only persist when the online/offline status actually changes (latency stays in memory)
+    if (statusChanged) {
+      this.persist();
+    }
   }
 
   public autoFailover(): ProxyRecord | null {

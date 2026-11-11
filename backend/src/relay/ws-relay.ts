@@ -178,24 +178,22 @@ export function createWebSocketRelay(options: { pool: ProxyPool }): {
         tcpSocket?.setNoDelay(true);
         tcpSocket?.setKeepAlive(true, 30000);
 
+        // Coalesce the 64-byte Obfuscated2 handshake and any frames the client queued while
+        // TCP was connecting into a single write, so they leave in as few packets as possible
+        const initialParts: Buffer[] = [];
         if (!isRaw && handshakeHeader) {
-          // Transmit 64-byte Obfuscated2 handshake
-          tcpSocket?.write(handshakeHeader);
+          initialParts.push(handshakeHeader);
           relayStats.recordTx(handshakeHeader.length);
         }
 
-        // Flush queued messages from WebSocket client
         while (pendingClientMessages.length > 0) {
-          const msg = pendingClientMessages.shift();
-          if (msg && tcpSocket) {
-            relayStats.recordTx(msg.length);
-            if (!isRaw && encryptCipher) {
-              const encrypted = encryptCipher.update(msg);
-              tcpSocket.write(encrypted);
-            } else {
-              tcpSocket.write(msg);
-            }
-          }
+          const msg = pendingClientMessages.shift()!;
+          relayStats.recordTx(msg.length);
+          initialParts.push(!isRaw && encryptCipher ? encryptCipher.update(msg) : msg);
+        }
+
+        if (initialParts.length > 0 && tcpSocket) {
+          tcpSocket.write(initialParts.length === 1 ? initialParts[0] : Buffer.concat(initialParts));
         }
       }
     );

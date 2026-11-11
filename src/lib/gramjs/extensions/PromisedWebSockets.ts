@@ -1,7 +1,5 @@
 import { Mutex } from 'async-mutex';
 
-import { concat } from '../../../util/encoding/buffer';
-
 const closeError = new Error('WebSocket was closed');
 const CONNECTION_TIMEOUT = 3000;
 const MAX_TIMEOUT = 30000;
@@ -130,7 +128,11 @@ export default class PromisedWebSockets {
 
   private timeout: number;
 
-  private stream: Uint8Array;
+  // Received bytes are kept as a queue of chunks so neither receiving nor reading
+  // re-copies the whole pending buffer (avoids quadratic copying on large media responses)
+  private chunks: Uint8Array[] = [];
+
+  private availableBytes = 0;
 
   private canRead?: boolean | Promise<boolean>;
 
@@ -149,7 +151,6 @@ export default class PromisedWebSockets {
   constructor(disconnectedCallback: () => void) {
     this.client = undefined;
     this.closed = true;
-    this.stream = new Uint8Array(0);
     this.disconnectedCallback = disconnectedCallback;
     this.timeout = CONNECTION_TIMEOUT;
   }
@@ -181,9 +182,8 @@ export default class PromisedWebSockets {
     if (this.closed) {
       throw closeError;
     }
-    const toReturn = this.stream.slice(0, number);
-    this.stream = this.stream.slice(number);
-    if (this.stream.length === 0) {
+    const toReturn = this.takeBytes(Math.min(number, this.availableBytes));
+    if (this.availableBytes === 0) {
       this.canRead = new Promise((resolve) => {
         this.resolveRead = resolve;
       });
@@ -196,13 +196,58 @@ export default class PromisedWebSockets {
     if (this.closed || !await this.canRead) {
       throw closeError;
     }
-    const toReturn = this.stream;
-    this.stream = new Uint8Array(0);
+    const toReturn = this.takeBytes(this.availableBytes);
     this.canRead = new Promise((resolve) => {
       this.resolveRead = resolve;
     });
 
     return toReturn;
+  }
+
+  private resetBuffer() {
+    this.chunks = [];
+    this.availableBytes = 0;
+  }
+
+  private pushChunk(data: Uint8Array) {
+    if (!data.length) return;
+    this.chunks.push(data);
+    this.availableBytes += data.length;
+  }
+
+  // Copies out exactly `count` bytes; the unread remainder of a chunk is kept as a zero-copy view
+  private takeBytes(count: number): Uint8Array {
+    if (count <= 0) return new Uint8Array(0);
+
+    const first = this.chunks[0];
+    if (first.length >= count) {
+      const result = first.slice(0, count);
+      if (first.length === count) {
+        this.chunks.shift();
+      } else {
+        this.chunks[0] = first.subarray(count);
+      }
+      this.availableBytes -= count;
+      return result;
+    }
+
+    const result = new Uint8Array(count);
+    let offset = 0;
+    while (offset < count) {
+      const chunk = this.chunks[0];
+      const needed = count - offset;
+      if (chunk.length <= needed) {
+        result.set(chunk, offset);
+        offset += chunk.length;
+        this.chunks.shift();
+      } else {
+        result.set(chunk.subarray(0, needed), offset);
+        this.chunks[0] = chunk.subarray(needed);
+        offset += needed;
+      }
+    }
+    this.availableBytes -= count;
+    return result;
   }
 
   getWebSocketLink(ip: string, port: number, isTestServer?: boolean, isPremium?: boolean, dcId = 2) {
@@ -226,7 +271,7 @@ export default class PromisedWebSockets {
   }
 
   connect(port: number, ip: string, isTestServer = false, isPremium = false, dcId = 2) {
-    this.stream = new Uint8Array(0);
+    this.resetBuffer();
     this.canRead = new Promise((resolve) => {
       this.resolveRead = resolve;
     });
@@ -366,7 +411,7 @@ export default class PromisedWebSockets {
         const data = new Uint8Array(message.data);
         clientRxBytes += data.byteLength;
         scheduleNetStatsBroadcast();
-        this.stream = this.stream.length === 0 ? data : concat(this.stream, data);
+        this.pushChunk(data);
         this.resolveRead?.(true);
         return;
       }
@@ -374,7 +419,7 @@ export default class PromisedWebSockets {
         const data = new Uint8Array(await new Response(message.data).arrayBuffer());
         clientRxBytes += data.byteLength;
         scheduleNetStatsBroadcast();
-        this.stream = this.stream.length === 0 ? data : concat(this.stream, data);
+        this.pushChunk(data);
         this.resolveRead?.(true);
       });
     };

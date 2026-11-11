@@ -252,8 +252,10 @@ function prepareMedia(mediaData: Exclude<ApiParsedMedia, ArrayBuffer>): ApiPrepa
   return mediaData;
 }
 
-const PREFETCH_CHUNKS_AHEAD = 2;
-const MAX_PREFETCH_CACHE_ENTRIES = 8;
+// Each part is 512KB and every round trip crosses China -> proxy -> Telegram DC (often 300-600ms),
+// so a deeper read-ahead window keeps enough bytes in flight to avoid buffer underruns
+const PREFETCH_CHUNKS_AHEAD = 6;
+const MAX_PREFETCH_CACHE_ENTRIES = 16;
 const PREFETCH_TTL_MS = 30_000;
 const PREFETCH_DELAY_MS = 60;
 
@@ -399,7 +401,9 @@ if (IS_PROGRESSIVE_SUPPORTED) {
         for (let step = 1; step <= PREFETCH_CHUNKS_AHEAD; step++) {
           const nextStart = params.end + 1 + (step - 1) * partLength;
           if (nextStart >= fullSize) break;
-          const nextEnd = Math.min(nextStart + partLength - 1, fullSize - 1);
+          // Must match the Service Worker's range key (`start + DEFAULT_PART_SIZE - 1`, unclamped),
+          // otherwise the final prefetched part is never reused; the download layer clamps to file size
+          const nextEnd = nextStart + partLength - 1;
           void getOrFetchProgressivePart({
             url: params.url,
             start: nextStart,
